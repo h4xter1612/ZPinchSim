@@ -1,0 +1,13 @@
+# MHD Toy (HLL + CT)
+time:
+  t_end: 2.0e-4
+  cfl: 0.25
+  dt_min: 1.0e-10
+  output_every: 100
+
+limiter: minmod
+eta_ct:  2.0e-2
+problem: brio_wu
+
+io:
+  out_dir: ./data

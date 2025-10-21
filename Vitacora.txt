@@ -1,0 +1,113 @@
+Bitácora (Paso 0)
+
+Fecha: (hoy)
+Objetivo: Establecer infraestructura mínima de debug y sanidad numérica antes de implementar dinámica.
+
+Cambios:
+
+Agregado utils con métricas: divB_L2, total_energy, count_nans.
+
+Agregado DebugFrame + escritura JSON en data/debug/.
+
+Script viz/check_sanity.py para validación rápida.
+
+CMakeLists.txt actualizado para compilar src/utils.cpp.
+
+README.md actualizado con sección “Step 0”.
+
+Artefactos generados:
+
+data/debug/debug_step_0000.json (ejemplo).
+
+Ejecutable zpinch_run sigue compilando; pendiente integrar DebugFrame en el loop principal.
+
+Próximo paso:
+Integrar escritura de DebugFrame dentro del loop en main.cpp/time_integrator.cpp y pasar a Paso 1: circuito 0D (LR) + constructor de equilibrio radial (tophat/Bennett) con residuo de fuerza medido.
+
+
+Bitácora — Paso 0 (cerrado)
+
+Objetivo: Instrumentar depuración y verificación temprana antes de añadir física.
+
+Cambios realizados
+
+include/utils.hpp / src/utils.cpp
+
+divB_L2, total_energy, count_nans
+
+DebugFrame::write_json(out_dir, step)
+
+viz/check_sanity.py: verificación rápida de CFL, divB_L2, nan_count
+
+CMakeLists.txt: añade src/utils.cpp
+
+src/main.cpp: escribe DebugFrame en inicio, checkpoints y final
+
+Artefactos
+
+data/debug/debug_step_*.json con:
+
+t, dt, cfl, max_wave, divB_L2, energy_tot, nan_count, notes
+
+Estado
+
+Paso 0 completo ✅. Preparado para Paso 1:
+
+0D LR: integrar 
+LdI/dt+RI=V(t)
+
+Equilibrio radial tophat/Bennett + residuo de fuerza
+
+Script viz/check_0d_and_equilibrium.py para validar
+
+Bitácora — Paso 1
+
+Objetivo: validar “motor” 0D de corriente y consistencia estática radial antes de MHD 2D.
+
+Cambios realizados
+
+include/physics.hpp: añadidos struct Circuit, struct Equilibrium, solve_LR, build_equilibrium.
+
+src/physics.cpp: implementaciones completas + utilidades.
+
+src/main.cpp: rama stage == "0D_EQ" que corre Step 1 y termina.
+
+configs/run.yaml: parámetros para circuito y equilibrio; out_dir: ./data.
+
+viz/check_0d_and_equilibrium.py: validación automática.
+
+Artefactos
+
+data/debug/0d_circuit.csv
+
+data/debug/equilibrium_residual.csv
+
+data/debug/equilibrium_profiles.csv
+
+Siguiente paso (cuando digas)
+
+Paso 2: 1D(r) difusivo + pared conductora, con step_1d_r(...), métricas 1d_r_metrics.csv y script check_1d_r_stability.py.
+
+Bitácora — Paso 2
+
+Objetivo: validar un operador 1D(r) controlado para evolución difusiva y chequear BCs de eje/parede.
+
+Cambios:
+
+include/physics.hpp: RadialBC, Resistivity, step_1d_r.
+
+src/physics.cpp: implementación cilíndrica + BCs + métricas.
+
+src/main.cpp: stage: 1D_R con bucle propio y dumps.
+
+configs/run.yaml: presets razonables (Bennett suave).
+
+viz/check_1d_r_stability.py: verificación de energía y divB.
+
+Bitácora rápida
+
+Hallazgo: energía sube levemente por discretización no conservativa + conteo de ghosts sin peso volumétrico.
+
+Fix: operador por flujos (conservativo) + BCs en flujos + energía con peso volumétrico en dominio físico + dt más estricto.
+
+Resultado esperado: energía no-creciente; divB bien.

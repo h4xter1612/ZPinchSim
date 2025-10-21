@@ -1,0 +1,44 @@
+
+# Step 4: pseudo-3D theta-modes seeding + monitors
+stage: 2D_MHD_TOY
+
+grid:
+  Nr: 128
+  Nz: 256
+  Rmax: 0.02
+  Zmax: 0.10
+  ghost: 3
+
+time:
+  t_end: 3.0e-4
+  cfl: 0.35
+  output_every: 50
+
+physics:
+  gamma: 1.6666666667
+  eta: 1.0e-6
+  Bz0: 0.5
+  init_profile: tophat
+  density0: 1.0
+  pressure0: 1.0e-2
+
+ct:
+  eta_ct: 2.0e-3
+
+toy:
+  limiter: mc        # mc|minmod
+  problem: sod       # sod|blast
+
+modes:
+  enable: true
+  m: 1
+  k: 40.0          # 2*pi/Lz approx if quieres modo de una onda
+  eps: 1.0e-4
+  r0_frac: 0.3     # anillo donde sembrar (fracción de Rmax)
+  sigma_frac: 0.05 # ancho gaussiano relativo
+  seed_vr: true
+  seed_bth: false
+
+monitor:
+  r_over_R: 0.3    # anillo de monitoreo de amplitud
+  field: vr        # vr|Bth

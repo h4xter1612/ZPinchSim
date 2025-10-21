@@ -1,0 +1,28 @@
+# Ignore build directory
+/build/
+/Build/
+/bin/
+/out/
+
+# CMake temporary files
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.vcxproj*
+*.sln
+*.user
+*.ipch
+*.obj
+*.o
+*.exe
+*.dll
+*.pdb
+
+# Python cache
+__pycache__/
+*.pyc
+
+# OS generated files
+.DS_Store
+Thumbs.db
