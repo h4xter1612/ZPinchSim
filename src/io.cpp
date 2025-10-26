@@ -47,6 +47,7 @@ void write_snapshot(const Fields& F, const RunConfig& cfg, int step, double t){
         meta << "t=" << std::setprecision(16) << t << "\n";
         meta << "Nr=" << F.g.Nr << ", Nz=" << F.g.Nz << ", Ng=" << F.g.Ng << "\n";
         meta << "Rmax=" << F.g.Rmax << ", Zmax=" << F.g.Zmax << "\n";
+        meta << "Bz0=" << cfg.phys.Bz0 << "\n";
     }
 }
 
@@ -64,6 +65,20 @@ void write_diag(const std::string& out_dir, int step, double t, double max_c){
         f << "step,t,max_c\n";
     }
     f << step << "," << t << "," << max_c << "\n";
+}
+
+void write_run_info(const std::string& out_dir, const std::string& cfg_path, double Bz0){
+    namespace fs = std::filesystem;
+    fs::create_directories(out_dir);
+    // copia del YAML para trazabilidad (best-effort)
+    try {
+        fs::copy_file(cfg_path, out_dir + "/_config.yaml", fs::copy_options::overwrite_existing);
+    } catch(...) { /* no-op */ }
+    // info rápida
+    std::ofstream f(out_dir + "/_run_info.txt");
+    if (f) {
+        f << "Bz0=" << std::setprecision(16) << Bz0 << "\n";
+    }
 }
 
 } // namespace io

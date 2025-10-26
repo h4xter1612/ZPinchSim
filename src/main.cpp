@@ -18,7 +18,7 @@ static double read_val(const std::string& s, const std::string& key, double def)
     auto e = s.find("\n", p); std::string line = (e==std::string::npos) ? s.substr(p) : s.substr(p, e-p);
     auto c = line.find(":"); std::string v = line.substr(c+1);
     auto h = v.find('#'); if (h!=std::string::npos) v = v.substr(0,h);
-    auto clip=[](int ch){return ch==' '||ch=='\t'||ch=='\r';};
+    auto clip=[](int ch){return ch==' '||ch=='\t' || ch=='\r';};
     size_t a=0,b=v.size(); while(a<b&&clip(v[a]))++a; while(b>a&&clip(v[b-1]))--b;
     if (a>=b) return def; try{ return std::stod(v.substr(a,b-a)); } catch(...){ return def; }
 }
@@ -29,10 +29,8 @@ static std::string read_sval(const std::string& s, const std::string& key, const
     auto c = s.find(":", p);
     auto e = s.find("\n", p);
     std::string v = (e==std::string::npos) ? s.substr(c+1) : s.substr(c+1, e-c-1);
-    // corta comentarios y cierres inline tipo "{ out_dir: ./data }" o ","
     auto cutpos = v.find_first_of("#},");
     if (cutpos != std::string::npos) v = v.substr(0, cutpos);
-
     auto clip = [](int ch){
         return ch==' ' || ch=='\t' || ch=='\r' || ch=='{' || ch=='}' || ch==','; 
     };
@@ -40,8 +38,7 @@ static std::string read_sval(const std::string& s, const std::string& key, const
     while (a<b && clip(v[a])) ++a;
     while (b>a && clip(v[b-1])) --b;
     std::string x = (a<b) ? v.substr(a,b-a) : std::string();
-
-    if (x.size()>=2 && ((x.front()=='"' && x.back()=='"') || (x.front()=='\'' && x.back()=='\''))){
+    if (x.size()>=2 && ((x.front()=='\"' && x.back()=='\"') || (x.front()=='\'' && x.back()=='\''))){
         x = x.substr(1, x.size()-2);
     }
     return x.empty()? def : x;
@@ -66,6 +63,12 @@ int main(int argc, char** argv){
     RunConfig rc{g, {}, t_end, cfl, dt_min, output_every, out_dir};
     Fields F(g);
 
+    // --- NEW: leer Bz0 del YAML y asignarlo al RunConfig ---
+    double Bz0 = read_val(cfgs, "Bz0", 
+                  read_val(cfgs, "Bz", 
+                  read_val(cfgs, "Bz_background", 0.0)));
+    rc.phys.Bz0 = Bz0;
+
     if (stage == "2D_MHD_TOY"){
         physics::MHD2DConfig mc;
         mc.gamma = read_val(cfgs, "gamma", 1.6666666667);
@@ -75,6 +78,17 @@ int main(int argc, char** argv){
         mc.t_end   = read_val(cfgs, "t_end", 1.0e-4);
         mc.output_every = read_ival(cfgs, "output_every", 50);
         mc.problem = read_sval(cfgs, "problem", "brio_wu");
+        // NEW step6 knobs
+        mc.vmax_guard = read_val(cfgs, "vmax_guard", 1.0e3);
+        mc.dt_max     = read_val(cfgs, "dt_max", 5e-8);
+        mc.diag_every = read_ival(cfgs, "diag_every", 50);
+
+        std::cout << "[CFG] out_dir=" << out_dir 
+                  << " Bz0=" << rc.phys.Bz0
+                  << " vmax_guard=" << mc.vmax_guard
+                  << " dt_max=" << mc.dt_max
+                  << " config=" << argv[1] << "\n";
+
         physics::run_2d_mhd_toy(F, rc, mc);
         std::cout << "[STAGE] 2D_MHD_TOY done. Metrics at " << out_dir << "/debug/2d_mhd_metrics.csv\n";
         return 0;

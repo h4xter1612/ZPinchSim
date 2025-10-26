@@ -1,0 +1,32 @@
+# Plantilla Step6: el script sustituye ${Bz0} y ${OUT}
+
+stage: 2D_MHD_TOY
+
+# Grid
+Nr: 128
+Nz: 256
+Rmax: 0.02
+Zmax: 0.10
+ghost: 3
+
+# Tiempo / salida
+t_end: 3.0e-4
+cfl: 0.6
+dt_min: 1.0e-10
+output_every: 25
+out_dir: "${OUT}"
+
+# Física (leído a nivel superior por tu main.cpp)
+gamma: 1.6666666667
+limiter: mc
+eta_ct: 1e-4
+problem: blast
+
+# Knobs Step6 (tu main.cpp ya los parsea a MHD2DConfig)
+vmax_guard: 500
+dt_max: 2.5e-8
+diag_every: 25
+
+# Bz a inyectar (placeholder que rellena el script)
+Bz0: ${Bz0}
+

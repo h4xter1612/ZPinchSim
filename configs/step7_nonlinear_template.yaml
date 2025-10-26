@@ -1,0 +1,44 @@
+# Step7: corrida no lineal con snapshots densos para visualización
+stage: 2D_MHD_TOY
+
+# Grid
+Nr: 128
+Nz: 256
+Rmax: 0.02
+Zmax: 0.10
+ghost: 3
+
+# Tiempo / salida (output_every más denso para el video)
+t_end: 6.0e-4
+cfl: 0.6
+dt_min: 1.0e-10
+output_every: 10
+out_dir: "${OUT}"
+
+# Física + CT
+gamma: 1.6666666667
+limiter: mc
+eta_ct: 1e-4
+problem: blast
+
+# Knobs step6
+vmax_guard: 500
+dt_max: 2.5e-8
+diag_every: 10
+
+# Bz inyectado (placeholder que rellena el script)
+Bz0: ${Bz0}
+
+# (opcional) “semilla” suave vía presión para activar no linealidad más visible
+# Si aún no tienes seeding en C++, esta sección es ignorada de forma segura.
+modes:
+  enable: true
+  field: p
+  m: 0           # 0 = sausage, 1 = kink
+  k: 62.8318530718
+  eps: 1.0e-3    # sube a 1e-2 si quieres entrar en no lineal antes
+  r0_frac: 0.30
+  sigma_frac: 0.05
+  seed_vr: true
+  seed_bth: true
+

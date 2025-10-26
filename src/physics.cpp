@@ -136,8 +136,15 @@ static void mhd_sweep_r(Fields& F, const RunConfig& cfg, double gamma,
                 if (!std::isfinite(U[n])) U[n] = 0.0;
             }
             rsolver::cons_to_prim(gamma, U, W);
-            W.vr = std::clamp(W.vr, -UMAX, UMAX);
-            W.vz = std::clamp(W.vz, -UMAX, UMAX);
+            // W.vr = std::clamp(W.vr, -UMAX, UMAX);
+            // W.vz = std::clamp(W.vz, -UMAX, UMAX);
+            const double rho_floor = 1e-8;
+            const double p_floor   = 1e-8;
+            W.rho = std::max(W.rho, rho_floor);
+            W.p   = std::max(W.p,   p_floor);
+            W.vr  = std::clamp(W.vr, -UMAX, UMAX);
+            W.vz  = std::clamp(W.vz, -UMAX, UMAX);
+
             F.rho[id]=W.rho; F.vr[id]=W.vr; F.vz[id]=W.vz; F.p[id]=W.p;
         }
         // BCs
@@ -208,8 +215,14 @@ static void mhd_sweep_z(Fields& F, const RunConfig& cfg, double gamma,
                 if (!std::isfinite(U[n])) U[n] = 0.0;
             }
             rsolver::cons_to_prim(gamma, U, W);
-            W.vr = std::clamp(W.vr, -UMAX, UMAX);
-            W.vz = std::clamp(W.vz, -UMAX, UMAX);
+            // W.vr = std::clamp(W.vr, -UMAX, UMAX);
+            // W.vz = std::clamp(W.vz, -UMAX, UMAX);
+            const double rho_floor = 1e-8;
+            const double p_floor   = 1e-8;
+            W.rho = std::max(W.rho, rho_floor);
+            W.p   = std::max(W.p,   p_floor);
+            W.vr  = std::clamp(W.vr, -UMAX, UMAX);
+            W.vz  = std::clamp(W.vz, -UMAX, UMAX);
             F.rho[id]=W.rho; F.vr[id]=W.vr; F.vz[id]=W.vz; F.p[id]=W.p;
         }
         // BCs
@@ -235,36 +248,46 @@ void run_2d_mhd_toy(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhdcfg){
 
     recon::Limiter lim = (mhdcfg.limiter=="minmod") ? recon::Limiter::Minmod : recon::Limiter::MC;
 
-    { std::ofstream(cfg.out_dir + "/debug/2d_mhd_metrics.csv") << "t,divB_L2,Etot\n"; }
+    { std::ofstream(cfg.out_dir + "/debug/2d_mhd_metrics.csv") << "t,divB_L2,Etot,vmax_raw,vmax_cap,dt\n"; }
 
     double t=0.0; int step=0;
     while (t < mhdcfg.t_end - 1e-16){
         // velocidad característica (rápida magnética)
-        double vmax = 1e-6; // reiniciar cada paso
+        double vmax_raw = 1e-6; // reiniciar cada paso
         for (size_t i=g.Ng; i<g.Ng+g.Nr; ++i){
             for (size_t k=g.Ng; k<g.Ng+g.Nz; ++k){
                 const size_t id = g.idx(i,k);
                 const double rho = std::max(1e-12, F.rho[id]);
                 const double p   = std::max(1e-12, F.p[id]);
                 const double cs  = std::sqrt(std::max(0.0, mhdcfg.gamma * p / rho));
-                const double vA  = std::sqrt( (F.Br[id]*F.Br[id] + F.Bz[id]*F.Bz[id]) / rho );
+                // const double vA  = std::sqrt( (F.Br[id]*F.Br[id] + F.Bz[id]*F.Bz[id]) / rho );
+                const double rho_safe = std::max(1e-10, rho); // ya tenías 1e-12; subir a 1e-10 aquí ayuda
+                const double B2 = F.Br[id]*F.Br[id] + F.Bz[id]*F.Bz[id];
+                // const double vA  = std::sqrt(B2 / rho_safe);
+
+                const double vA_cap = 5e3; // por ejemplo
+                const double vA = std::min(std::sqrt(B2 / rho_safe), vA_cap);
                 const double cf  = std::sqrt(cs*cs + vA*vA);
-                vmax = std::max(vmax, std::abs(F.vr[id]) + cf);
-                vmax = std::max(vmax, std::abs(F.vz[id]) + cf);
+                vmax_raw = std::max(vmax_raw, std::abs(F.vr[id]) + cf);
+                vmax_raw = std::max(vmax_raw, std::abs(F.vz[id]) + cf);
             }
         }
-        const double VMAX_GUARD = 1e3;   // CAP opcional
-        vmax = std::min(vmax, VMAX_GUARD);
+        double vmax = vmax_raw;
+        if (mhdcfg.vmax_guard > 0.0) vmax = std::min(vmax, mhdcfg.vmax_guard);
 
         if (!std::isfinite(vmax) || vmax <= 0){
             std::cerr << "[ABORT] vmax invalid: " << vmax << "\n";
             break;
         }
 
-        double dt = mhdcfg.cfl * std::min(g.dr, g.dz) / vmax;
-        // dt = std::clamp(dt, 1e-10, mhdcfg.t_end - t);
-        const double DT_MAX = 5e-8; // ajusta si quieres más/menos pasos
-        dt = std::min(dt, DT_MAX);
+        if (!std::isfinite(vmax_raw)) {
+            std::cerr << "[ABORT] vmax_raw non-finite at step " << step << ", t=" << t << "\n";
+            break;
+        }
+
+        double dt_cfl = mhdcfg.cfl * std::min(g.dr, g.dz) / vmax;
+        double dt = dt_cfl;
+        if (mhdcfg.dt_max > 0.0) dt = std::min(dt, mhdcfg.dt_max);
         dt = std::clamp(dt, 1e-10, mhdcfg.t_end - t);
 
         // Paso completo
@@ -281,7 +304,7 @@ void run_2d_mhd_toy(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhdcfg){
 
         if (step % 100 == 0) {
             std::cout << "[2D_MHD_TOY] t=" << t << " step=" << step 
-                      << " dt=" << dt << " vmax=" << vmax << "\n";
+                      << " dt=" << dt << " vmax_raw=" << vmax_raw << " vmax=" << vmax << "\n";
         }
 
         if (utils::count_nans(F) > 0) {
@@ -298,6 +321,16 @@ void run_2d_mhd_toy(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhdcfg){
 
         if (step % cfg.output_every == 0){
             io::write_snapshot(F, cfg, step, t);
+        }
+        // diag.csv con frecuencia configurable
+        if (mhdcfg.diag_every < 1) {
+            io::write_diag(cfg.out_dir, step, t, vmax);
+        } else if (step % mhdcfg.diag_every == 0) {
+            io::write_diag(cfg.out_dir, step, t, vmax);
+        }
+
+        // métricas
+        if (step % cfg.output_every == 0){
             double divB = utils::divB_L2(F);
             double Etot=0.0;
             for (size_t i=0;i<g.size_r();++i){
@@ -310,7 +343,8 @@ void run_2d_mhd_toy(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhdcfg){
                 }
             }
             std::ofstream(cfg.out_dir + "/debug/2d_mhd_metrics.csv", std::ios::app)
-                << std::setprecision(16) << t << "," << divB << "," << Etot << "\n";
+                << std::setprecision(16) << t << "," << divB << "," << Etot << ","
+                << vmax_raw << "," << vmax << "," << dt << "\n";
         }
     }
 
@@ -318,7 +352,6 @@ void run_2d_mhd_toy(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhdcfg){
     io::write_snapshot(F, cfg, /*step=*/step, /*t=*/t);
     double divB = utils::divB_L2(F);
     double Etot = 0.0;
-    // const auto& g = F.g;
     for (size_t i=0;i<g.size_r();++i){
         for (size_t k=0;k<g.size_z();++k){
             size_t id=g.idx(i,k);
@@ -329,7 +362,8 @@ void run_2d_mhd_toy(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhdcfg){
         }
     }
     std::ofstream(cfg.out_dir + "/debug/2d_mhd_metrics.csv", std::ios::app)
-        << std::setprecision(16) << t << "," << divB << "," << Etot << "\n";
+        << std::setprecision(16) << t << "," << divB << "," << Etot << ","
+        << 0.0 << "," << 0.0 << "," << 0.0 << "\n";
 
 }
 
