@@ -13,6 +13,9 @@
 
 namespace physics {
 
+static constexpr double PI = 3.141592653589793238462643383279502884;
+
+// -------------------- Inicialización del problema --------------------
 static void init_problem(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhd){
     const auto& g = F.g;
 
@@ -83,7 +86,7 @@ static void init_problem(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhd
         }
     }
 
-    // --- Otros presets opcionales (sin cambios) ---
+    // --- Otros presets opcionales ---
     if (mhd.problem=="blast"){
         for (size_t i=0;i<NrT;++i){
             const double r = (int(i)-int(g.Ng)+0.5)*g.dr;
@@ -133,41 +136,111 @@ static void init_problem(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhd
     }
 }
 
+// --- NEW: perfiles v_z(r) inyectados tras init_problem ---
+static void apply_vz_profile(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhd){
+    (void)cfg;
+    const auto& g = F.g;
+    if (mhd.flow.type=="off" || std::abs(mhd.flow.v0)<=0.0) return;
 
-// --- NEW: anula las pendientes en las 2 primeras/últimas celdas interiores
-// --- stronger: zero slopes in the first/last 4 interior cells
+    // Referencia c_s en el centro para interpretar v0 como "Mach"
+    const size_t ic = g.Ng + g.Nr/2, kc = g.Ng + g.Nz/2;
+    const double p0   = std::max(1e-12, F.p[g.idx(ic,kc)]);
+    const double rho0 = std::max(1e-12, F.rho[g.idx(ic,kc)]);
+    const double cs0  = std::sqrt(std::max(0.0, mhd.gamma * p0 / rho0));
+    const double v0   = mhd.flow.v0 * cs0;
+
+    const double R0   = mhd.flow.r0_frac * g.Rmax;
+    const double SIG  = std::max(1e-12, mhd.flow.sigma_frac * g.Rmax);
+
+    for (size_t i=0;i<g.size_r();++i){
+        const double r = (int(i)-int(g.Ng)+0.5)*g.dr;
+        double vzr = 0.0;
+        if (mhd.flow.type=="linear"){
+            const double rr = std::min(std::abs(r), R0);
+            vzr = v0 * (rr/(R0+1e-12));
+        } else if (mhd.flow.type=="localized"){
+            const double ga = std::exp(-0.5*std::pow((r - R0)/SIG,2.0));
+            vzr = v0 * ga;
+        }
+        for (size_t k=g.Ng;k<g.Ng+g.Nz;++k){
+            F.vz[g.idx(i,k)] += vzr;
+        }
+    }
+}
+static inline double cap_wave_speed(double vmax_raw, double vmax_guard){
+    if (vmax_guard <= 0.0) return vmax_raw;
+    return std::min(vmax_raw, vmax_guard);
+}
+
+// --- Helpers de estabilidad cerca de bordes ---
 static inline void kill_edge_slopes(std::vector<double>& darr, size_t L, size_t R){
     if (R <= L) return;
     if (R - L >= 4) { darr[L+0] = 0.0; darr[R-1] = 0.0; }
     else { for (size_t q=L; q<R; ++q) darr[q] = 0.0; }
 }
 
-
-// --- NEW: KO filter (4º orden) aplicado SOLO a las celdas cercanas al eje y pared en r
-// cambia firma y fac por defecto
+// --- KO filter (4º orden) SOLO en franjas r-borde ---
+// KO (4º orden) aplicado SOLO en celdas cercanas al eje/paret en r.
+// fac ~ 0.012 por defecto; prueba 0.012–0.020 si ves franjas.
 static inline void ko_filter_edges_r(Fields& F, double dt, double fac=0.012){
     const auto& g = F.g;
     if (g.Nr < 8) return;
+
     const double h  = g.dr;
     const double nu = fac * dt / (h + 1e-12);
 
     auto apply_ko = [&](std::vector<double>& A){
         std::vector<double> B = A;
         const size_t iL = g.Ng, iR = g.Ng + g.Nr - 1;
+
         auto KO = [&](size_t i, size_t k){
             auto I = [&](size_t ii){ return g.idx(ii,k); };
             return -B[I(i-2)] + 4.0*B[I(i-1)] - 6.0*B[I(i)] + 4.0*B[I(i+1)] - B[I(i+2)];
         };
+
         for (size_t k=g.Ng; k<g.Ng+g.Nz; ++k){
+            // aplica en 2–3 celdas interiores cercanas a los bordes
             for (size_t i : {iL+1, iL+2, iR-2, iR-1}){
                 if (i>=iL+2 && i+2<=iR) A[g.idx(i,k)] += nu*KO(i,k);
             }
         }
     };
+
+    // Antes: rho y vr; AHORA: también vz, p, Br, Bz, Bth
     apply_ko(F.rho);
     apply_ko(F.vr);
+    apply_ko(F.vz);   // NUEVO
+    apply_ko(F.p);    // NUEVO
+    apply_ko(F.Br);   // NUEVO
+    apply_ko(F.Bz);   // NUEVO
+    apply_ko(F.Bth);  // NUEVO
 }
 
+// --- NEW: KO opcional también en bordes z ---
+static inline void ko_filter_edges_z(Fields& F, double dt, double fac=0.012){
+    const auto& g = F.g;
+    if (g.Nz < 8) return;
+    const double h  = g.dz;
+    const double nu = fac * dt / (h + 1e-12);
+    auto apply_ko = [&](std::vector<double>& A){
+        std::vector<double> B = A;
+        const size_t kL = g.Ng, kR = g.Ng + g.Nz - 1;
+        auto KO = [&](size_t i, size_t k){
+            auto I = [&](size_t ii,size_t kk){ return g.idx(ii,kk); };
+            return -B[I(i,k-2)] + 4.0*B[I(i,k-1)] - 6.0*B[I(i,k)] + 4.0*B[I(i,k+1)] - B[I(i,k+2)];
+        };
+        for (size_t i=g.Ng; i<g.Ng+g.Nr; ++i){
+            for (size_t k : {kL+1, kL+2, kR-2, kR-1}){
+                if (k>=kL+2 && k+2<=kR) A[g.idx(i,k)] += nu*KO(i,k);
+            }
+        }
+    };
+    apply_ko(F.rho);
+    apply_ko(F.vr);
+    apply_ko(F.vz);
+}
+
+// --- Siembra modal (pseudo-θ) ---
 static void seed_modes(Fields& F, const RunConfig& cfg, const MHD2DConfig& m){
     if (!m.modes.enable || (m.modes.eps<=0.0)) return;
     const auto& g = F.g;
@@ -183,17 +256,14 @@ static void seed_modes(Fields& F, const RunConfig& cfg, const MHD2DConfig& m){
             const double z = (int(kidx)-int(g.Ng)+0.5)*g.dz;
             const size_t id = g.idx(i,kidx);
 
-            // Pseudo-θ: m=0 → sausage (radial breathing), m=1 → "desplazamiento" helical
-            const double phase = k*z; // sin θ real: sólo dependencia axial
+            const double phase = k*z;
             const double fz = std::cos(phase);
 
             if (m.modes.seed_vr){
                 if (M==0){
-                    // sausage: respiración radial
-                    F.vr[id] += eps * shape_r * fz;
+                    F.vr[id] += eps * shape_r * fz; // sausage
                 } else {
-                    // kink "pseudo": cambia de signo con z
-                    F.vr[id] += eps * (r/(R0+1e-12)) * shape_r * fz;
+                    F.vr[id] += eps * (r/(R0+1e-12)) * shape_r * fz; // pseudo-kink
                 }
             }
             if (m.modes.seed_bth){
@@ -202,11 +272,13 @@ static void seed_modes(Fields& F, const RunConfig& cfg, const MHD2DConfig& m){
         }
     }
 }
-// BCs físicas en r: eje (iL) y pared conductora (iR)
+
+// --- BCs físicas en r: eje y pared ---
 static inline void apply_bc_r(Fields& F){
     const auto& g = F.g;
     const size_t iL = g.Ng, iR = g.Ng + g.Nr - 1;
     for (size_t k=g.Ng; k<g.Ng+g.Nz; ++k){
+        // eje (conductor)
         F.vr [g.idx(iL,k)] = 0.0;
         F.Br [g.idx(iL,k)] = 0.0;
         F.Bth[g.idx(iL,k)] = 0.0;
@@ -214,7 +286,7 @@ static inline void apply_bc_r(Fields& F){
         F.p  [g.idx(iL,k)] = F.p [g.idx(iL+1,k)];
         F.rho[g.idx(iL,k)] = F.rho[g.idx(iL+1,k)];
         F.Bz [g.idx(iL,k)] = F.Bz[g.idx(iL+1,k)];
-
+        // pared (conductora)
         F.vr [g.idx(iR,k)] = 0.0;
         F.vz [g.idx(iR,k)] = F.vz[g.idx(iR-1,k)];
         F.p  [g.idx(iR,k)] = F.p [g.idx(iR-1,k)];
@@ -225,6 +297,7 @@ static inline void apply_bc_r(Fields& F){
     }
 }
 
+// --- Fuente geométrica (hoop stress) en v_r ---
 static inline void apply_axisym_sources(Fields& F, double dt){
     const auto& g = F.g;
     for (size_t i=g.Ng; i<g.Ng+g.Nr; ++i){
@@ -232,7 +305,6 @@ static inline void apply_axisym_sources(Fields& F, double dt){
         const double rinv = (r>0.0)? 1.0/r : 0.0;
         for (size_t k=g.Ng; k<g.Ng+g.Nz; ++k){
             const size_t id = g.idx(i,k);
-            // dv_r/dt += + Btheta^2 / (rho * r)
             const double rho = std::max(1e-12, F.rho[id]);
             const double Svr = (F.Bth[id]*F.Bth[id]) * rinv / rho;
             F.vr[id] += dt * Svr;
@@ -240,36 +312,46 @@ static inline void apply_axisym_sources(Fields& F, double dt){
     }
 }
 
-// Esponja simple cerca de los bordes: amortigua v y Bth para evitar reflexiones/crecimientos
-
+// Esponja simple cerca de los bordes: amortigua v, Bθ y (NUEVO) Br,Bz.
+// Sólo actúa donde f>0 (franjas cercanas a pared y extremos en z).
 static inline void apply_sponge(Fields& F, const RunConfig& cfg, const MHD2DConfig& m, double dt){
     const auto& g = F.g;
-    const double Rcut = 0.88 * g.Rmax;
-    const double Zcut = 0.92 * g.Zmax;
-    const double alpha0 = 30.0;
+    const double Rcut   = 0.88 * g.Rmax;     // inicio franja radial
+    const double Zcut   = 0.92 * g.Zmax;     // inicio franja axial (desde el centro)
+    const double alpha0 = 30.0;              // intensidad base (ajustable)
 
     for (size_t i=0;i<g.size_r();++i){
         const double r = (int(i)-int(g.Ng)+0.5)*g.dr;
         double fr = (r>Rcut)? std::min(1.0,(r-Rcut)/(g.Rmax-Rcut+1e-12)) : 0.0;
+
         for (size_t k=0;k<g.size_z();++k){
-            const double z = (int(k)-int(g.Ng)+0.5)*g.dz;
-            const double z0 = 0.5*g.Zmax;
+            const double z   = (int(k)-int(g.Ng)+0.5)*g.dz;
+            const double z0  = 0.5*g.Zmax;
             const double dzb = std::max(0.0, std::fabs(z-z0) - Zcut);
             double fz = (dzb>0.0)? std::min(1.0, dzb/(0.5*g.Zmax - Zcut + 1e-12)) : 0.0;
+
+            // Suaviza el perfil (cuadrático)
             fr *= fr; fz *= fz;
             const double f = std::max(fr,fz);
             if (f<=0.0) continue;
+
             const size_t id = g.idx(i,k);
             const double damp = std::exp(-alpha0 * f * dt);
+
+            // Velocidades
             F.vr[id]  *= damp;
             F.vz[id]  *= damp;
             F.vth[id] *= damp;
+
+            // Campos magnéticos: antes sólo Bth; AHORA también Br y Bz
+            F.Bth[id] *= damp;
+            F.Br[id]  *= damp;   // NUEVO
+            F.Bz[id]  *= damp;   // NUEVO
         }
     }
 }
 
-// Periodic/Copy BCs en z: maneja correctamente todas las capas ghost (Ng >= 1)
-
+// --- Periodic/Copy BCs en z ---
 static inline void apply_bc_z(Fields& F, bool periodic){
     const auto& g = F.g;
     const size_t kL = g.Ng, kR = g.Ng + g.Nz - 1;
@@ -315,8 +397,9 @@ static inline void apply_bc_z(Fields& F, bool periodic){
     }
 }
 
-// --- NUEVO: inducción axisimétrica para Bθ ---
+// --- Inducción axisimétrica para Bθ ---
 static void update_Btheta_axisym(Fields& F, double dt, double eta_theta, bool periodic_z){
+    (void)periodic_z;
     const auto& g = F.g;
     std::vector<double> Bth_new(F.Bth);
 
@@ -360,8 +443,9 @@ static void update_Btheta_axisym(Fields& F, double dt, double eta_theta, bool pe
     F.Bth.swap(Bth_new);
 }
 
-
+// --- Constrained Transport para (Br,Bz) con Eθ ---
 static void ct_update(Fields& F, const RunConfig& cfg, double dt, double eta_ct, bool periodic_z){
+    (void)cfg;
     const auto& g = F.g;
     std::vector<double> E(g.size_r()*g.size_z(), 0.0);
     auto Eidx = [&](size_t i, size_t k){ return g.idx(i,k); };
@@ -410,9 +494,10 @@ static void ct_update(Fields& F, const RunConfig& cfg, double dt, double eta_ct,
     apply_bc_z(F, periodic_z);
 }
 
-// ===== Barrido MHD en r (MUSCL + HLL); B no se actualiza aquí =====
+// -------------------- Sweeps MHD (poloidales) --------------------
 static void mhd_sweep_r(Fields& F, const RunConfig& cfg, double gamma,
                         recon::Limiter lim, double dt){
+    (void)cfg;
     const auto& g = F.g;
     const size_t i0 = g.Ng, i1 = g.Ng + g.Nr;
     const size_t k0 = g.Ng, k1 = g.Ng + g.Nz;
@@ -427,8 +512,8 @@ static void mhd_sweep_r(Fields& F, const RunConfig& cfg, double gamma,
             rho[i] = std::max(1e-12, F.rho[id]);
             vr[i]  = F.vr[id];
             vz[i]  = F.vz[id];
-            // --- usar presión efectiva en los flujos poloidales:
-            p[i]   = std::max(1e-12, F.p[id] + 0.5*F.Bth[id]*F.Bth[id]); // <-- NEW
+            // --- presión efectiva en flujos poloidales:
+            p[i]   = std::max(1e-12, F.p[id] + 0.5*F.Bth[id]*F.Bth[id]);
             Br[i]  = F.Br[id];
             Bz[i]  = F.Bz[id];
             Bth[i] = F.Bth[id];
@@ -510,9 +595,9 @@ static void mhd_sweep_r(Fields& F, const RunConfig& cfg, double gamma,
     }
 }
 
-// ===== Barrido MHD en z (MUSCL + HLL); B no se actualiza aquí =====
 static void mhd_sweep_z(Fields& F, const RunConfig& cfg, double gamma,
                         recon::Limiter lim, double dt, bool periodic_z){
+    (void)cfg; (void)periodic_z;
     const auto& g = F.g;
     const size_t i0 = g.Ng, i1 = g.Ng + g.Nr;
     const size_t k0 = g.Ng, k1 = g.Ng + g.Nz;
@@ -526,7 +611,7 @@ static void mhd_sweep_z(Fields& F, const RunConfig& cfg, double gamma,
             rho[k] = std::max(1e-12, F.rho[id]);
             vr[k]  = F.vr[id];
             vz[k]  = F.vz[id];
-            p[k]   = std::max(1e-12, F.p[id] + 0.5*F.Bth[id]*F.Bth[id]); // <-- NEW
+            p[k]   = std::max(1e-12, F.p[id] + 0.5*F.Bth[id]*F.Bth[id]); // p_eff
             Br[k]  = F.Br[id];
             Bz[k]  = F.Bz[id];
         }
@@ -590,19 +675,55 @@ static void mhd_sweep_z(Fields& F, const RunConfig& cfg, double gamma,
     }
 }
 
+// -------------------- Diagnósticos extendidos --------------------
+static double energy_Btheta(const Fields& F){
+    const auto& g = F.g;
+    double sum = 0.0;
+    for (size_t i=g.Ng;i<g.Ng+g.Nr;++i){
+        const double r = (int(i)-int(g.Ng)+0.5)*g.dr;
+        for (size_t k=g.Ng;k<g.Ng+g.Nz;++k){
+            const size_t id = g.idx(i,k);
+            sum += 0.5 * F.Bth[id]*F.Bth[id] * (2.0*PI*r) * g.dr * g.dz; // dV cilíndrico
+        }
+    }
+    return sum;
+}
+
+// Amplitud modal A_k(t) integrando en r la proyección en z
+static double mode_amplitude_k(const Fields& F, double k, const std::string& from){
+    if (k<=0.0) return 0.0;
+    const auto& g = F.g;
+    double Ak = 0.0;
+    for (size_t i=g.Ng;i<g.Ng+g.Nr;++i){
+        const double r = (int(i)-int(g.Ng)+0.5)*g.dr;
+        double proj = 0.0;
+        for (size_t kz=g.Ng;kz<g.Ng+g.Nz;++kz){
+            const double z = (int(kz)-int(g.Ng)+0.5)*g.dz;
+            const size_t id = g.idx(i,kz);
+            const double q = (from=="pressure")? F.p[id] : F.rho[id];
+            proj += q * std::cos(k*z);
+        }
+        proj *= g.dz; // integral en z
+        Ak += std::abs(proj) * (2.0*PI*r) * g.dr;
+    }
+    return Ak;
+}
+
+// -------------------- Driver principal --------------------
 void run_2d_mhd_toy(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhdcfg){
     const auto& g = F.g;
     namespace fs = std::filesystem;
     fs::create_directories(cfg.out_dir + "/debug");
 
     init_problem(F, cfg, mhdcfg);
+    apply_vz_profile(F, cfg, mhdcfg);   // NEW: cizalladura axial
     seed_modes(F, cfg, mhdcfg);
     io::write_snapshot(F, cfg, /*step=*/0, /*t=*/0.0);
 
     recon::Limiter lim = (mhdcfg.limiter=="minmod") ? recon::Limiter::Minmod : recon::Limiter::MC;
 
     { std::ofstream(cfg.out_dir + "/debug/2d_mhd_metrics.csv")
-          << "t,divB_L2,Etot,vmax_raw,dt\n"; }
+          << "t,divB_L2,Etot,E_Bth,vmax_raw,dt,Ak\n"; }
 
     const bool periodic_z = (mhdcfg.bc_z == "periodic");
 
@@ -619,7 +740,7 @@ void run_2d_mhd_toy(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhdcfg){
                 const double p   = std::max(1e-12, F.p[id]);
                 const double cs  = std::sqrt(std::max(0.0, mhdcfg.gamma * p / rho));
                 const double rho_safe = std::max(1e-10, rho);
-                const double B2  = F.Br[id]*F.Br[id] + F.Bz[id]*F.Bz[id] + F.Bth[id]*F.Bth[id]; // <-- NEW
+                const double B2  = F.Br[id]*F.Br[id] + F.Bz[id]*F.Bz[id] + F.Bth[id]*F.Bth[id];
                 const double vA  = std::sqrt(B2 / rho_safe);
                 const double cf  = std::sqrt(cs*cs + vA*vA);
                 vmax_raw = std::max(vmax_raw, std::abs(F.vr[id]) + cf);
@@ -629,7 +750,7 @@ void run_2d_mhd_toy(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhdcfg){
         if (!std::isfinite(vmax_raw) || vmax_raw <= 0.0){
             std::cerr << "[ABORT] vmax_raw invalid: " << vmax_raw << "\n"; break;
         }
-
+        vmax_raw = cap_wave_speed(vmax_raw, mhdcfg.vmax_guard);  // NUEVO: guardia suave
         // === 2) dt por CFL (sin caps de vA) ===
         double dt_cfl = mhdcfg.cfl * std::min(g.dr, g.dz) / vmax_raw;
         double dt = dt_cfl;
@@ -641,8 +762,9 @@ void run_2d_mhd_toy(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhdcfg){
         mhd_sweep_z(F, cfg, mhdcfg.gamma, lim, dt, periodic_z);             // p_eff adentro
         ct_update(F, cfg, dt, mhdcfg.eta_ct, periodic_z);
         update_Btheta_axisym(F, dt, /*eta_theta=*/1.5*mhdcfg.eta_ct, periodic_z);
-        apply_axisym_sources(F, /*dt=*/dt);                                  // <-- NEW (hoop stress)
-        ko_filter_edges_r(F, dt, /*fac=*/0.012);                             // suaviza franjas
+        apply_axisym_sources(F, /*dt=*/dt);                                  // hoop stress
+        ko_filter_edges_r(F, dt, /*fac=*/0.012);
+        ko_filter_edges_z(F, dt, /*fac=*/0.012);                             // NEW
         apply_bc_r(F);
         apply_sponge(F, cfg, mhdcfg, dt);
 
@@ -653,6 +775,7 @@ void run_2d_mhd_toy(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhdcfg){
         update_Btheta_axisym(F, 0.5*dt, /*eta_theta=*/1.5*mhdcfg.eta_ct, periodic_z);
         apply_axisym_sources(F, /*dt=*/0.5*dt);
         ko_filter_edges_r(F, 0.5*dt, /*fac=*/0.012);
+        ko_filter_edges_z(F, 0.5*dt, /*fac=*/0.012);                         // NEW
         apply_bc_r(F);
         apply_sponge(F, cfg, mhdcfg, 0.5*dt);
 
@@ -679,17 +802,23 @@ void run_2d_mhd_toy(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhdcfg){
         if (step % cfg.output_every == 0){
             io::write_snapshot(F, cfg, step, t);
             io::write_diag(cfg.out_dir, step, t, vmax_raw);
+        }
+        if (step % mhdcfg.diag_every == 0){
+            const double EBth = energy_Btheta(F);
+            const double Ak   = mhdcfg.write_mode_amp ? mode_amplitude_k(F, mhdcfg.k_diag, mhdcfg.amp_from) : 0.0;
             std::ofstream(cfg.out_dir + "/debug/2d_mhd_metrics.csv", std::ios::app)
                 << std::setprecision(16)
                 << t << "," << utils::divB_L2(F) << "," << utils::total_energy(F,cfg)
-                << "," << vmax_raw << "," << dt << "\n";
+                << "," << EBth << "," << vmax_raw << "," << dt << "," << Ak << "\n";
         }
     }
 
     io::write_snapshot(F, cfg, /*step=*/step, /*t=*/t);
     std::ofstream(cfg.out_dir + "/debug/2d_mhd_metrics.csv", std::ios::app)
         << std::setprecision(16) << t << "," << utils::divB_L2(F) << ","
-        << utils::total_energy(F,cfg) << "," << 0.0 << "," << 0.0 << "\n";
+        << utils::total_energy(F,cfg) << "," << energy_Btheta(F)
+        << "," << 0.0 << "," << 0.0 << "," << 0.0 << "\n";
 }
 
 } // namespace physics
+

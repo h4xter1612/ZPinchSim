@@ -43,13 +43,13 @@ static std::string read_sval(const std::string& s, const std::string& key, const
     }
     return x.empty()? def : x;
 }
-
 static bool read_bval(const std::string& s, const std::string& key, bool def){
     auto v = read_sval(s, key, def? "true":"false");
     if (v=="1"||v=="true"||v=="True"||v=="yes") return true;
     if (v=="0"||v=="false"||v=="False"||v=="no") return false;
     return def;
 }
+
 int main(int argc, char** argv){
     if (argc<2){ std::cerr << "Usage: zpinch_run <config.yaml>\n"; return 1; }
     std::string cfgs = slurp(argv[1]);
@@ -99,11 +99,24 @@ int main(int argc, char** argv){
         mc.modes.seed_vr  = read_bval(cfgs, "modes.seed_vr", true);
         mc.modes.seed_bth = read_bval(cfgs, "modes.seed_bth", false);
 
+        // --- Flow shear (NEW) ---
+        mc.flow.type       = read_sval(cfgs, "flow.type", "off");
+        mc.flow.v0         = read_val (cfgs, "flow.v0", 0.0);
+        mc.flow.r0_frac    = read_val (cfgs, "flow.r0_frac", 0.30);
+        mc.flow.sigma_frac = read_val (cfgs, "flow.sigma_frac", 0.12);
+
+        // --- Modal diagnostics (NEW) ---
+        mc.write_mode_amp  = read_bval(cfgs, "diag.mode_amp", true);
+        mc.k_diag          = read_val (cfgs, "diag.k_diag", 0.0);
+        mc.amp_from        = read_sval(cfgs, "diag.amp_from", "density");
+
         std::cout << "[CFG] out_dir=" << out_dir 
                   << " Bz0=" << rc.phys.Bz0
                   << " vmax_guard=" << mc.vmax_guard
                   << " dt_max=" << mc.dt_max
                   << " bc_z=" << mc.bc_z
+                  << " flow=" << mc.flow.type
+                  << " v0=" << mc.flow.v0
                   << " modes=" << (mc.modes.enable? "on":"off")
                   << " config=" << argv[1] << "\n";
 
@@ -115,3 +128,4 @@ int main(int argc, char** argv){
     std::cout << "No recognized stage; exiting.\n";
     return 0;
 }
+

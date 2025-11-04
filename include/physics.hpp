@@ -1,9 +1,16 @@
-// physics.hpp
 #pragma once
 #include "state.hpp"
 #include <string>
 
 namespace physics {
+
+// --- NEW: Perfil de flujo axial v_z(r)
+struct FlowProfile {
+    std::string type{"off"};   // "off" | "linear" | "localized"
+    double v0{0.0};            // pico, interpretado como Mach (escala con c_s0)
+    double r0_frac{0.30};      // fracción de Rmax para el pico
+    double sigma_frac{0.12};   // ancho gaussiano (solo "localized")
+};
 
 struct CTConfig { double vel_amp{0.0}; std::string vel_type{"solid"}; double resistivity{0.0}; };
 void run_2d_ct(Fields& F, const RunConfig& cfg, const CTConfig& ctcfg);
@@ -33,6 +40,12 @@ struct MHD2DConfig {
     // NEW
     std::string bc_z{"copy"};   // "copy" o "periodic"
     ModeSeed modes;             // semilla modal
+
+    // --- NEW: flujo axial y diagnósticos
+    FlowProfile flow;           // perfil de v_z(r)
+    bool write_mode_amp{true};  // escribir amplitud modal en CSV
+    double k_diag{0.0};         // k a proyectar (>0 activa medición)
+    std::string amp_from{"density"}; // "density" | "pressure"
 };
 
 void run_2d_mhd_toy(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhdcfg);
