@@ -43,6 +43,13 @@ static std::string read_sval(const std::string& s, const std::string& key, const
     }
     return x.empty()? def : x;
 }
+
+static bool read_bval(const std::string& s, const std::string& key, bool def){
+    auto v = read_sval(s, key, def? "true":"false");
+    if (v=="1"||v=="true"||v=="True"||v=="yes") return true;
+    if (v=="0"||v=="false"||v=="False"||v=="no") return false;
+    return def;
+}
 int main(int argc, char** argv){
     if (argc<2){ std::cerr << "Usage: zpinch_run <config.yaml>\n"; return 1; }
     std::string cfgs = slurp(argv[1]);
@@ -78,15 +85,26 @@ int main(int argc, char** argv){
         mc.t_end   = read_val(cfgs, "t_end", 1.0e-4);
         mc.output_every = read_ival(cfgs, "output_every", 50);
         mc.problem = read_sval(cfgs, "problem", "brio_wu");
-        // NEW step6 knobs
         mc.vmax_guard = read_val(cfgs, "vmax_guard", 1.0e3);
         mc.dt_max     = read_val(cfgs, "dt_max", 5e-8);
         mc.diag_every = read_ival(cfgs, "diag_every", 50);
+        mc.bc_z       = read_sval(cfgs, "bc_z", "copy"); // NEW
+
+        // --- Modes (NEW) ---
+        mc.modes.enable   = read_bval(cfgs, "modes.enable", false);
+        mc.modes.m        = (int)read_val(cfgs, "modes.m", 0);
+        mc.modes.k        = read_val(cfgs, "modes.k", 0.0);
+        mc.modes.eps      = read_val(cfgs, "modes.eps", 0.0);
+        mc.modes.r0_frac  = read_val(cfgs, "modes.r0_frac", 0.3);
+        mc.modes.seed_vr  = read_bval(cfgs, "modes.seed_vr", true);
+        mc.modes.seed_bth = read_bval(cfgs, "modes.seed_bth", false);
 
         std::cout << "[CFG] out_dir=" << out_dir 
                   << " Bz0=" << rc.phys.Bz0
                   << " vmax_guard=" << mc.vmax_guard
                   << " dt_max=" << mc.dt_max
+                  << " bc_z=" << mc.bc_z
+                  << " modes=" << (mc.modes.enable? "on":"off")
                   << " config=" << argv[1] << "\n";
 
         physics::run_2d_mhd_toy(F, rc, mc);

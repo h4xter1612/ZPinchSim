@@ -40,7 +40,10 @@ void write_snapshot(const Fields& F, const RunConfig& cfg, int step, double t){
         std::ofstream f(base + "_Bth.csv");
         write_csv_vec(f, F.Bth);
     }
-
+    {
+        std::ofstream f(base + "_Bz.csv");
+        write_csv_vec(f, F.Bz);
+    }
     // Metadata de la malla / tiempo (para scripts)
     {
         std::ofstream meta(base + "_meta.txt");
