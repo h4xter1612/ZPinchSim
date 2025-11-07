@@ -107,3 +107,4 @@ inline void hll_z(double gamma, const MHDPrim& WL, const MHDPrim& WR, Flux& FH){
 }
 
 } // namespace rsolver
+

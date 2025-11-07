@@ -1,5 +1,5 @@
 #include "physics.hpp"
-#include "riemann.hpp"
+#include "rsolver.hpp"
 #include "reconstruction.hpp"
 #include "io.hpp"
 #include "utils.hpp"
@@ -137,7 +137,7 @@ static void init_problem(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhd
 }
 
 // --- NEW: perfiles v_z(r) inyectados tras init_problem ---
-static void apply_vz_profile(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhd){
+static void apply_vz_profile(Fields& F, [[maybe_unused]] const RunConfig& cfg, const MHD2DConfig& mhd){
     (void)cfg;
     const auto& g = F.g;
     if (mhd.flow.type=="off" || std::abs(mhd.flow.v0)<=0.0) return;
@@ -242,7 +242,7 @@ static inline void ko_filter_edges_z(Fields& F, double dt, double fac=0.012){
 
 // --- Siembra modal (pseudo-θ) ---
 // --- Siembra modal (pseudo-θ) ---
-static void seed_modes(Fields& F, const RunConfig& cfg, const MHD2DConfig& m){
+static void seed_modes(Fields& F, [[maybe_unused]] const RunConfig& cfg, const MHD2DConfig& m){
     if (!m.modes.enable || (m.modes.eps<=0.0)) return;
     const auto& g = F.g;
     const double k = m.modes.k;
@@ -330,7 +330,7 @@ static inline void apply_axisym_sources(Fields& F, double dt){
 
 // Esponja simple cerca de los bordes: amortigua v, Bθ y (NUEVO) Br,Bz.
 // Sólo actúa donde f>0 (franjas cercanas a pared y extremos en z).
-static inline void apply_sponge(Fields& F, const RunConfig& cfg, const MHD2DConfig& m, double dt){
+static inline void apply_sponge(Fields& F, [[maybe_unused]] const RunConfig& cfg, [[maybe_unused]] const MHD2DConfig& m, double dt){
     const auto& g = F.g;
     const double Rcut   = 0.88 * g.Rmax;     // inicio franja radial
     const double Zcut   = 0.92 * g.Zmax;     // inicio franja axial (desde el centro)
@@ -460,7 +460,7 @@ static void update_Btheta_axisym(Fields& F, double dt, double eta_theta, bool pe
 }
 
 // --- Constrained Transport para (Br,Bz) con Eθ ---
-static void ct_update(Fields& F, const RunConfig& cfg, double dt, double eta_ct, bool periodic_z){
+static void ct_update(Fields& F, [[maybe_unused]] const RunConfig& cfg, double dt, double eta_ct, bool periodic_z){
     (void)cfg;
     const auto& g = F.g;
     std::vector<double> E(g.size_r()*g.size_z(), 0.0);
@@ -511,7 +511,7 @@ static void ct_update(Fields& F, const RunConfig& cfg, double dt, double eta_ct,
 }
 
 // -------------------- Sweeps MHD (poloidales) --------------------
-static void mhd_sweep_r(Fields& F, const RunConfig& cfg, double gamma,
+static void mhd_sweep_r(Fields& F, [[maybe_unused]] const RunConfig& cfg, double gamma,
                         recon::Limiter lim, double dt){
     (void)cfg;
     const auto& g = F.g;
@@ -611,7 +611,7 @@ static void mhd_sweep_r(Fields& F, const RunConfig& cfg, double gamma,
     }
 }
 
-static void mhd_sweep_z(Fields& F, const RunConfig& cfg, double gamma,
+static void mhd_sweep_z(Fields& F, [[maybe_unused]] const RunConfig& cfg, double gamma,
                         recon::Limiter lim, double dt, bool periodic_z){
     (void)cfg; (void)periodic_z;
     const auto& g = F.g;

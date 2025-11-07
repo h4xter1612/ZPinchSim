@@ -13,7 +13,7 @@ static void write_csv_vec(std::ofstream& f, const std::vector<double>& v){
     }
     f << "\n";
 }
-static inline void rz_shape_center(const Fields& F, std::vector<double>& out,
+static inline void rz_shape_center([[maybe_unused]] const Fields& F, std::vector<double>& out,
                                    const std::vector<double>& in_center) {
     // Copia directa: 'in_center' ya debe venir con tamaño Nr*Nz (solo zona central).
     out = in_center;
@@ -27,31 +27,34 @@ static void project_m1_full_rz(const Fields& F, const std::vector<double>& vec_f
                                std::vector<double>& F1s_center)
 {
     const auto& g = F.g;
-    const int Nr  = g.Nr, Nz = g.Nz, Ng = g.Ng;
+
+    const std::size_t Nr  = g.Nr;
+    const std::size_t Nz  = g.Nz;
+    const std::size_t Ng  = g.Ng;
     const double dz = g.dz;
 
     // extrae centro: tamaño Nr x Nz
     F1c_center.assign(Nr*Nz, 0.0);
     F1s_center.assign(Nr*Nz, 0.0);
 
-    auto CIDX = [&](int i, int k){ return i*Nz + k; };
-    auto FIDX = [&](int ii, int kk){ return (ii)* (g.Nz + 2*Ng) + (kk); };
+    auto CIDX = [&](std::size_t i, std::size_t k){ return i*Nz + k; };
+    auto FIDX = [&](std::size_t ii, std::size_t kk){ return (ii)*(g.Nz + 2*Ng) + (kk); };
 
     // Para cada r (i central), proyecta F(r, z) contra cos/sin y de-mean en z
-    for (int i=0; i<Nr; ++i){
-        const int ii = Ng + i;
+    for (std::size_t i=0; i<Nr; ++i){
+        const std::size_t ii = Ng + i;
         // media en z:
         double mean_z = 0.0;
-        for (int k=0; k<Nz; ++k){
-            const int kk = Ng + k;
+        for (std::size_t k=0; k<Nz; ++k){
+            const std::size_t kk = Ng + k;
             mean_z += vec_full[FIDX(ii, kk)];
         }
-        mean_z /= std::max(1, Nz);
+        mean_z /= static_cast<double>(std::max<std::size_t>(1, Nz));
 
         // coeficientes A_c, A_s (2/Zmax * integral) -> aquí discretizamos: (2/Z) * sum dz
         double Ac = 0.0, As = 0.0;
-        for (int k=0; k<Nz; ++k){
-            const int kk = Ng + k;
+        for (std::size_t k=0; k<Nz; ++k){
+            const std::size_t kk = Ng + k;
             const double z = (k + 0.5) * dz;
             const double f = vec_full[FIDX(ii, kk)] - mean_z;  // de-mean en z
             Ac += f * std::cos(kproj * z);
@@ -62,7 +65,7 @@ static void project_m1_full_rz(const Fields& F, const std::vector<double>& vec_f
         Ac *= fac;  As *= fac;
 
         // Ahora llena líneas completas F1c/F1s con Ac*cos(kz), As*sin(kz)
-        for (int k=0; k<Nz; ++k){
+        for (std::size_t k=0; k<Nz; ++k){
             const double z = (k + 0.5) * dz;
             F1c_center[CIDX(i,k)] = Ac * std::cos(kproj * z);
             F1s_center[CIDX(i,k)] = As * std::sin(kproj * z);
@@ -72,14 +75,14 @@ static void project_m1_full_rz(const Fields& F, const std::vector<double>& vec_f
 
 static void write_center_csv(const std::string& base_path,
                              const std::string& tag,
-                             const std::vector<double>& center, int Nr, int Nz)
+                             const std::vector<double>& center, std::size_t Nr, std::size_t Nz)
 {
     // Guarda un vector linealizado Nr*Nz (orden i mayor, luego k) como CSV plano
     std::ofstream f(base_path + "_" + tag + ".csv");
     f << std::setprecision(16);
-    for (int i=0; i<Nr; ++i){
-        const int off = i*Nz;
-        for (int k=0; k<Nz; ++k){
+    for (std::size_t i=0; i<Nr; ++i){
+        const std::size_t off = i*Nz;
+        for (std::size_t k=0; k<Nz; ++k){
             f << center[off + k];
             if (k+1 < Nz) f << ",";
         }
@@ -95,7 +98,9 @@ void write_snapshot_2p5D(const Fields& F, const RunConfig& cfg, int step, double
     fs::create_directories(cfg.out_dir);
 
     const auto& g = F.g;
-    const int Nr = g.Nr, Nz = g.Nz, Ng = g.Ng;
+    const std::size_t Nr = g.Nr;
+    const std::size_t Nz = g.Nz;
+    // const std::size_t Ng = g.Ng;
 
     const std::string base = cfg.out_dir + "/fields_" + std::to_string(step);
 

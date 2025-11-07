@@ -25,7 +25,6 @@ double divB_L2(const Fields& F){
     for (std::size_t i=1; i<Nr-1; ++i){
         double r = (int(i)-int(g.Ng)+0.5)*g.dr;
         for (std::size_t k=1; k<Nz-1; ++k){
-            auto id = g.idx(i,k);
             double dBr_dr = (F.Br[g.idx(i+1,k)] - F.Br[g.idx(i-1,k)])/(2.0*g.dr);
             double dBz_dz = (F.Bz[g.idx(i,k+1)] - F.Bz[g.idx(i,k-1)])/(2.0*g.dz);
             // Cylindrical: divB = (1/r) d(r Br)/dr + dBz/dz + (1/r) dBθ/dθ (last term=0 in axisymmetry)
