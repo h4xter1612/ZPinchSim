@@ -241,6 +241,7 @@ static inline void ko_filter_edges_z(Fields& F, double dt, double fac=0.012){
 }
 
 // --- Siembra modal (pseudo-θ) ---
+// --- Siembra modal (pseudo-θ) ---
 static void seed_modes(Fields& F, const RunConfig& cfg, const MHD2DConfig& m){
     if (!m.modes.enable || (m.modes.eps<=0.0)) return;
     const auto& g = F.g;
@@ -257,17 +258,32 @@ static void seed_modes(Fields& F, const RunConfig& cfg, const MHD2DConfig& m){
             const size_t id = g.idx(i,kidx);
 
             const double phase = k*z;
-            const double fz = std::cos(phase);
+            const double fz = std::cos(phase); // usamos cos para el coeficiente "1c"
 
             if (m.modes.seed_vr){
                 if (M==0){
-                    F.vr[id] += eps * shape_r * fz; // sausage
+                    // sausage puro en modo 0 (como antes)
+                    F.vr[id] += eps * shape_r * fz;
+                } else if (M==1){
+                    // kink: NO tocar vr (modo 0). Sembrar en coef m=1 cos(θ)
+                    F.vr1c[id] += eps * (r/(R0+1e-12)) * shape_r * fz;
+                    // Si quisieras también sin(θ), aquí pondrías F.vr1s[id] += ...
                 } else {
-                    F.vr[id] += eps * (r/(R0+1e-12)) * shape_r * fz; // pseudo-kink
+                    // otros m: por ahora tratar como m=0 (opcional)
+                    F.vr[id] += eps * shape_r * fz;
                 }
             }
+
             if (m.modes.seed_bth){
-                F.Bth[id] *= (1.0 + 0.1*eps * fz); // ondulación suave
+                if (M==0){
+                    // ondulación suave en modo 0, como antes
+                    F.Bth[id] *= (1.0 + 0.1*eps * fz);
+                } else if (M==1){
+                    // poner ondulación en m=1 (cos θ)
+                    F.Bth1c[id] += 0.1 * eps * F.Bth[id] * fz;
+                } else {
+                    F.Bth[id] *= (1.0 + 0.1*eps * fz);
+                }
             }
         }
     }
@@ -719,6 +735,12 @@ void run_2d_mhd_toy(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhdcfg){
     apply_vz_profile(F, cfg, mhdcfg);   // NEW: cizalladura axial
     seed_modes(F, cfg, mhdcfg);
     io::write_snapshot(F, cfg, /*step=*/0, /*t=*/0.0);
+    // Guardar componentes 2.5D (m=1) si hay k conocido
+    double k_proj = (mhdcfg.modes.k > 0.0) ? mhdcfg.modes.k
+                  : ((mhdcfg.k_diag > 0.0) ? mhdcfg.k_diag : 0.0);
+    if (k_proj > 0.0) {
+        io::write_snapshot_2p5D(F, cfg, /*step=*/0, /*t=*/0.0, k_proj);
+    }
 
     recon::Limiter lim = (mhdcfg.limiter=="minmod") ? recon::Limiter::Minmod : recon::Limiter::MC;
 
@@ -801,6 +823,7 @@ void run_2d_mhd_toy(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhdcfg){
         }
         if (step % cfg.output_every == 0){
             io::write_snapshot(F, cfg, step, t);
+            io::write_snapshot_2p5D(F, cfg, step, t, k_proj);
             io::write_diag(cfg.out_dir, step, t, vmax_raw);
         }
         if (step % mhdcfg.diag_every == 0){
@@ -814,6 +837,10 @@ void run_2d_mhd_toy(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhdcfg){
     }
 
     io::write_snapshot(F, cfg, /*step=*/step, /*t=*/t);
+
+    if (k_proj > 0.0) {
+        io::write_snapshot_2p5D(F, cfg, /*step=*/0, /*t=*/0.0, k_proj);
+    }
     std::ofstream(cfg.out_dir + "/debug/2d_mhd_metrics.csv", std::ios::app)
         << std::setprecision(16) << t << "," << utils::divB_L2(F) << ","
         << utils::total_energy(F,cfg) << "," << energy_Btheta(F)

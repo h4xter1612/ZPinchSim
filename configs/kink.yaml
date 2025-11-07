@@ -1,0 +1,47 @@
+# configs/kink_2p5d.yaml
+stage: 2D_MHD_TOY
+out_dir: ./data/kink_m1_2p5d
+
+# Malla / dominio
+Nr: 128
+Nz: 256
+ghost: 2
+Rmax: 0.02         # [m]
+Zmax: 0.10         # [m]  => n=1 -> k = 2π/Zmax = 62.8318530718 rad/m
+
+# Tiempo / CFL / salida
+t_end: 7.0e-5
+cfl: 0.25
+dt_max: 2.0e-08
+output_every: 20
+diag_every: 20
+vmax_guard: 1200
+
+# Física / numérica
+gamma: 1.6666666667
+Bz0: 0.01
+eta_ct: 1.0e-3
+limiter: mc
+bc_z: periodic
+problem: pinch_bennett    # conserva Bθ(r) inicial de Bennett
+
+# Flujo axial (apagado)
+flow.type: off
+flow.v0: 0.0
+flow.r0_frac: 0.30
+flow.sigma_frac: 0.12
+
+# Semilla modal (kink m=1)
+modes.enable: true
+modes.m: 1
+modes.k: 62.8318530718    # = 2π / Zmax
+modes.eps: 3.0e-3
+modes.r0_frac: 0.30
+modes.seed_vr: true
+modes.seed_bth: true
+
+# Diagnóstico modal opcional (para CSV interno del código C++)
+write_mode_amp: true
+k_diag: 62.8318530718
+amp_from: pressure         # "pressure" | "density"
+

@@ -1,0 +1,34 @@
+stage: 2D_MHD_TOY
+out_dir: ./data/sausage_m0_2p5d
+
+# --- malla/tiempos ---
+Nr: 128
+Nz: 256
+ghost: 2
+Rmax: 0.02
+Zmax: 0.10
+
+t_end: 1.2e-4           # ↑ más tiempo para que madure la modulación
+cfl: 0.25
+dt_max: 2.0e-08
+output_every: 20
+diag_every: 20
+vmax_guard: 1500
+
+# --- física base ---
+gamma: 1.6666666667
+Bz0: 0.003              # ↓ amarra menos: favorece compresión m=0
+eta_ct: 1.0e-4          # ↓ menos difusión → más contraste radial
+limiter: mc
+bc_z: periodic
+problem: pinch_bennett
+
+# --- semilla m=0 (sausage) ---
+modes.enable: true
+modes.m: 0
+modes.k: 50.0           # ~0.8× tu k; suele crecer más que el π/R típico (ajustable)
+modes.eps: 3.0e-2       # ↑ amplitud de semilla (ya fuera de lineal débil)
+modes.r0_frac: 0.25     # semilla más concentrada en el core
+modes.seed_vr: true
+modes.seed_bth: true    # CLAVE para que se vea en p sin esperar mucho
+
