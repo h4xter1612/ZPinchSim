@@ -1,12 +1,15 @@
+# === Z-Pinch: STABLE reference (no modal forcing), with 2.5D outputs enabled ===
 stage: 2D_MHD_TOY
 out_dir: ./data/stable_ref_2p5d
 
+# --- Grid / domain ---
 Nr: 128
 Nz: 256
 ghost: 2
 Rmax: 0.02
 Zmax: 0.10
 
+# --- Time / I/O / stability ---
 t_end: 7.0e-5
 cfl: 0.25
 dt_max: 2.0e-08
@@ -14,12 +17,25 @@ output_every: 20
 diag_every: 20
 vmax_guard: 1200
 
+# --- Base physics / numerics ---
 gamma: 1.6666666667
-Bz0: 0.10        # más alto que 0.01 para ayudar a la estabilidad
+Bz0: 0.10           # significantly higher to promote stability
 eta_ct: 1.0e-3
 limiter: mc
 bc_z: periodic
 problem: pinch_bennett
 
+# --- No modal seeding ---
 modes.enable: false
+
+# --- Optional flow shear (off) ---
+flow.type: off
+flow.v0: 0.0
+flow.r0_frac: 0.30
+flow.sigma_frac: 0.12
+
+# --- Modal diagnostics (harmless even if modes are disabled) ---
+diag.mode_amp: true
+diag.k_diag: 62.8318530718
+diag.amp_from: pressure
 

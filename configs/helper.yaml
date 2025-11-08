@@ -1,0 +1,76 @@
+# =========================
+# ZPinch 2D MHD Toy — Config Helper
+# =========================
+# This file documents all supported parameters and their meaning.
+# Start from here to build your custom setup.
+
+# ---------- Grid ----------
+Nr: 128        # Number of radial cells in the central domain (no ghosts)
+Nz: 256        # Number of axial cells in the central domain (no ghosts)
+ghost: 2       # Number of ghost cells on each side (r and z)
+Rmax: 0.01     # Domain extent in r  (meters or nondim)
+Zmax: 0.10     # Domain extent in z  (meters or nondim)
+
+# ---------- Run / Time stepping ----------
+t_end: 1.0e-4     # End time for the simulation
+cfl: 0.4          # CFL number for dt = cfl * min(dr, dz) / wavespeed
+dt_min: 1.0e-9    # Minimum dt clamp (safeguard)
+output_every: 50  # Write field snapshots every N steps
+out_dir: ./data   # Output directory (will be created if missing)
+verbose: true     # Print configuration and end-of-run messages
+
+# ---------- Stage ----------
+# The code currently recognizes a single stage:
+stage: 2D_MHD_TOY
+
+# ---------- Physics / Background fields ----------
+# Background axial magnetic field used at initialization.
+# You can specify any of these (priority: Bz0 > Bz > Bz_background).
+Bz0: 0.0
+# Bz: 0.0
+# Bz_background: 0.0
+
+# ---------- MHD Solver Controls ----------
+gamma: 1.6666666667   # Ratio of specific heats
+limiter: mc           # Reconstruction limiter: "mc" or "minmod"
+eta_ct: 0.0           # Resistive term used in CT update (Eθ correction); 0.0 disables
+vmax_guard: 1.0e3     # Optional cap for characteristic speed (stability guard)
+dt_max: 5.0e-8        # Optional upper bound on dt
+diag_every: 50        # Append diagnostic line to debug/2d_mhd_metrics.csv every N steps
+bc_z: copy            # Axial BCs for primitive fields: "copy" or "periodic"
+problem: brio_wu      # Initial condition set: "brio_wu", "blast", or your custom tag
+
+# ---------- Flow shear (applied after init) ----------
+flow:
+  type: off           # "off", "linear", "localized"
+  v0: 0.0             # Amplitude; interpreted as Mach at axis (multiplied by local c_s)
+  r0_frac: 0.30       # For profiles that need a reference radius: fraction of Rmax
+  sigma_frac: 0.12    # Width for "localized" Gaussian, as fraction of Rmax
+
+# ---------- Modal seeding (pseudo-θ) ----------
+modes:
+  enable: false       # If true, seed perturbations
+  m: 0                # Mode number: 0 (sausage), 1 (kink), others treated as 0 for now
+  k: 0.0              # Axial wavenumber for seeding/projection (rad / length)
+  eps: 0.0            # Amplitude of the seed
+  r0_frac: 0.3        # Radial scale for the Gaussian envelope in r
+  seed_vr: true       # Seed radial velocity
+  seed_bth: false     # Optionally modulate B_theta component
+
+# ---------- Modal diagnostics ----------
+diag:
+  mode_amp: true      # If true, compute and log a simple mode amplitude Ak(t)
+  k_diag: 0.0         # Wavenumber used for diagnostics/projection; set > 0 to enable
+  amp_from: density   # Which field to project for Ak: "density" or "pressure"
+
+# ---------- Notes ----------
+# - To reproduce “sausage” runs: set modes.enable: true, modes.m: 0, and choose k>0, eps>0.
+# - To reproduce “kink” runs:    set modes.enable: true, modes.m: 1, and choose k>0, eps>0.
+# - For a stable reference, keep modes.enable: false and pick a smooth equilibrium (problem: brio_wu or your own).
+# - For periodic z: set bc_z: periodic.
+# - Output files:
+#   - fields_<step>_*.csv and _meta.txt under out_dir
+#   - debug/2d_mhd_metrics.csv with running diagnostics
+# - After the run:
+#   - Use viz/diagnostics.py and viz/viz.py to analyze/plot (see the scripts’ --help).
+

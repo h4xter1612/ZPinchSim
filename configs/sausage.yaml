@@ -1,34 +1,47 @@
+# === Z-Pinch: SAUSAGE (m=0) scenario, with 2.5D outputs (m=1 projections written) ===
 stage: 2D_MHD_TOY
 out_dir: ./data/sausage_m0_2p5d
 
-# --- malla/tiempos ---
-Nr: 128
-Nz: 256
-ghost: 2
-Rmax: 0.02
-Zmax: 0.10
+# --- Grid / domain ---
+Nr: 128             # radial cells (center region; ghosts are added by code)
+Nz: 256             # axial cells (center region; ghosts are added by code)
+ghost: 2            # ghost cells on each side (r and z)
+Rmax: 0.02          # domain radius (meters, arbitrary units OK if non-dimensional)
+Zmax: 0.10          # domain length in z
 
-t_end: 1.2e-4           # ↑ más tiempo para que madure la modulación
+# --- Time / I/O / stability ---
+t_end: 1.2e-4       # longer run so the m=0 modulation develops clearly
 cfl: 0.25
 dt_max: 2.0e-08
 output_every: 20
 diag_every: 20
-vmax_guard: 1500
+vmax_guard: 1500    # caps the estimated wave speed to avoid too-small dt
 
-# --- física base ---
-gamma: 1.6666666667
-Bz0: 0.003              # ↓ amarra menos: favorece compresión m=0
-eta_ct: 1.0e-4          # ↓ menos difusión → más contraste radial
-limiter: mc
-bc_z: periodic
-problem: pinch_bennett
+# --- Base physics / numerics ---
+gamma: 1.6666666667 # ideal gas gamma = 5/3
+Bz0: 0.003          # weaker axial field favors m=0 compression
+eta_ct: 1.0e-4      # smaller diffusion sharpens radial structure
+limiter: mc         # reconstruction limiter: "mc" or "minmod"
+bc_z: periodic      # z-boundary: "periodic" or "copy"
+problem: pinch_bennett  # initial Bθ(r) from a Bennett-like profile
 
-# --- semilla m=0 (sausage) ---
+# --- Seeding: SAUSAGE (m=0) ---
 modes.enable: true
 modes.m: 0
-modes.k: 50.0           # ~0.8× tu k; suele crecer más que el π/R típico (ajustable)
-modes.eps: 3.0e-2       # ↑ amplitud de semilla (ya fuera de lineal débil)
-modes.r0_frac: 0.25     # semilla más concentrada en el core
+modes.k: 50.0       # axial wavenumber; tune around your geometry/physics
+modes.eps: 3.0e-2   # relatively strong seed (beyond very-weak linear regime)
+modes.r0_frac: 0.25 # radial localization (fraction of Rmax)
 modes.seed_vr: true
-modes.seed_bth: true    # CLAVE para que se vea en p sin esperar mucho
+modes.seed_bth: true  # helps visibility of the pattern in pressure early on
+
+# --- Optional flow shear (disabled here) ---
+flow.type: off      # "off" | "linear" | "localized"
+flow.v0: 0.0        # Mach-scale factor; used only if flow.type != off
+flow.r0_frac: 0.30  # for flow profiles
+flow.sigma_frac: 0.12
+
+# --- Modal diagnostics written by the C++ code (CSV in debug/) ---
+diag.mode_amp: true
+diag.k_diag: 50.0
+diag.amp_from: pressure   # "pressure" | "density"
 

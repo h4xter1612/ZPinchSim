@@ -1,4 +1,3 @@
-
 #include "utils.hpp"
 #include <cmath>
 #include <fstream>
@@ -10,10 +9,18 @@
 
 namespace utils {
 
+/**
+ * @brief Detect NaN or non-finite numbers.
+ */
 static inline bool is_bad(double x){
     return std::isnan(x) || !std::isfinite(x);
 }
 
+/**
+ * @brief Compute an L2-like norm of div(B) using central differences on the interior.
+ *        Cylindrical assumption: divB = (1/r) d(r Br)/dr + dBz/dz (axisymmetry => ∂θ term = 0).
+ *        This is a diagnostic; constrained transport should control divB in production.
+ */
 double divB_L2(const Fields& F){
     const auto& g = F.g;
     const std::size_t Nr = g.size_r();
@@ -21,13 +28,12 @@ double divB_L2(const Fields& F){
     double acc = 0.0;
     std::size_t n = 0;
 
-    // Central differences on interior cells (toy diagnostic; CT will replace later)
     for (std::size_t i=1; i<Nr-1; ++i){
         double r = (int(i)-int(g.Ng)+0.5)*g.dr;
         for (std::size_t k=1; k<Nz-1; ++k){
             double dBr_dr = (F.Br[g.idx(i+1,k)] - F.Br[g.idx(i-1,k)])/(2.0*g.dr);
             double dBz_dz = (F.Bz[g.idx(i,k+1)] - F.Bz[g.idx(i,k-1)])/(2.0*g.dz);
-            // Cylindrical: divB = (1/r) d(r Br)/dr + dBz/dz + (1/r) dBθ/dθ (last term=0 in axisymmetry)
+            // robust form for (1/r) d(r Br)/dr near r=0
             double d_rBr_dr = ( (r+g.dr*0.5)*F.Br[g.idx(i+1,k)] - (r-g.dr*0.5)*F.Br[g.idx(i-1,k)] )/(2.0*g.dr);
             double divB = (r>1e-14 ? d_rBr_dr/r : dBr_dr) + dBz_dz;
             acc += divB*divB;
@@ -37,25 +43,32 @@ double divB_L2(const Fields& F){
     return std::sqrt(acc / std::max<std::size_t>(n,1));
 }
 
+/**
+ * @brief Very rough total "energy" diagnostic by summing KE + magnetic + internal per cell.
+ *        For a proper integral in cylindrical geometry one would include 2π r dr dz.
+ *        Here we keep uniform area for a simple relative measure.
+ */
 double total_energy(const Fields& F, const RunConfig& cfg){
     const auto& g = F.g;
     double sum = 0.0;
     const double dr = g.dr, dz = g.dz;
-    const double cell_area = dr*dz; // axisymmetry; strictly area element is 2π r dr dz for integrals,
-                                    // but for a diagnostic L2-like sum we keep uniform weighting.
+    const double cell_area = dr*dz;
+
     for(std::size_t i=0;i<g.size_r();++i){
         for(std::size_t k=0;k<g.size_z();++k){
             auto id = g.idx(i,k);
-            // Primitive-to-energy approximation for diagnostic (not the conserved E):
-            double ke = 0.5 * F.rho[id]*(F.vr[id]*F.vr[id] + F.vz[id]*F.vz[id] + F.vth[id]*F.vth[id]);
-            double mag = 0.5 * (F.Br[id]*F.Br[id] + F.Bz[id]*F.Bz[id] + F.Bth[id]*F.Bth[id]);
-            double pe = F.p[id]/(cfg.phys.gamma - 1.0);
+            const double ke  = 0.5 * F.rho[id]*(F.vr[id]*F.vr[id] + F.vz[id]*F.vz[id] + F.vth[id]*F.vth[id]);
+            const double mag = 0.5 * (F.Br[id]*F.Br[id] + F.Bz[id]*F.Bz[id] + F.Bth[id]*F.Bth[id]);
+            const double pe  = F.p[id]/(cfg.phys.gamma - 1.0);
             sum += (ke + mag + pe) * cell_area;
         }
     }
     return sum;
 }
 
+/**
+ * @brief Count NaNs or non-finite entries across primary state arrays.
+ */
 std::size_t count_nans(const Fields& F){
     std::size_t c = 0;
     auto scan = [&](const std::vector<double>& v){
@@ -67,6 +80,10 @@ std::size_t count_nans(const Fields& F){
     return c;
 }
 
+/**
+ * @brief Write a small JSON debug frame under out_dir/debug/debug_step_####.json.
+ *        Creates the directory if needed and logs a warning on failures.
+ */
 void DebugFrame::write_json(const std::string& out_dir, int step) const{
     namespace fs = std::filesystem;
     fs::path base = fs::path(out_dir) / "debug";
@@ -99,3 +116,4 @@ void DebugFrame::write_json(const std::string& out_dir, int step) const{
 }
 
 } // namespace utils
+

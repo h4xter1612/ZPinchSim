@@ -1,6 +1,9 @@
 #include "state.hpp"
 #include <algorithm>
 
+/**
+ * @brief Allocate all field arrays to (Nr+2Ng)*(Nz+2Ng) and zero them.
+ */
 Fields::Fields(const Grid& grid) 
     : g(grid)
     , rho(g.size_r()*g.size_z())
@@ -12,7 +15,7 @@ Fields::Fields(const Grid& grid)
     , Bth(rho.size())
     , p  (rho.size())
     , E  (rho.size())
-    // --- modos m=1 (mismo tamaño) ---
+    // --- modal m=1 (cos/sin) with same size ---
     , rho1c(rho.size())
     , rho1s(rho.size())
     , p1c  (rho.size())
@@ -29,13 +32,16 @@ Fields::Fields(const Grid& grid)
     zero();
 }
 
+/**
+ * @brief Set all arrays (mode-0 and mode-1) to zero.
+ */
 void Fields::zero() {
     auto Z = [](auto& v){ std::fill(v.begin(), v.end(), 0.0); };
 
-    // modo 0
+    // mode 0
     Z(rho); Z(vr); Z(vz); Z(vth); Z(Br); Z(Bz); Z(Bth); Z(p); Z(E);
 
-    // modo 1
+    // mode 1
     Z(rho1c); Z(rho1s);
     Z(p1c);   Z(p1s);
     Z(vr1c);  Z(vr1s);
