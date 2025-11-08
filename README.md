@@ -18,7 +18,7 @@ Why this tool?
 
 ## Physics Background (What is a Z‑pinch and why it destabilizes?)
 
-A **Z‑pinch** confines plasma with its **self‑generated azimuthal field** $ B_\theta(r) $ due to an axial current $ I_z $. The Lorentz force density $ J_z \times B_\theta $ produces an **inward magnetic pressure** (``pinch'') that compresses the column. In ideal MHD, radial force balance reads
+A **Z‑pinch** confines plasma with its **self‑generated azimuthal field** $B_\theta(r)$ due to an axial current $I_z$. The Lorentz force density $J_z \times B_\theta$ produces an **inward magnetic pressure** (``pinch'') that compresses the column. In ideal MHD, radial force balance reads
 
 $\frac{dp}{dr} + \frac{B_\theta}{\mu_0}\frac{d B_\theta}{dr} + \frac{B_\theta^2}{\mu_0\,r} = 0$
 
@@ -54,6 +54,7 @@ $\partial_t \mathbf{B} = -\nabla \times \mathbf{E},\qquad \mathbf{E} = -\mathbf{
 
 **Azimuthal field $B_\theta$ update (axisymmetric advection–diffusion form)**  
 Discretized as a conservative advection in $(r,z)$ plus a resistive operator consistent with cylindrical geometry:
+
 $\partial_t B_\theta + \nabla\!\cdot(B_\theta \mathbf{v}_{rz}) + \frac{v_r}{r} B_\theta = \eta\,\left[\frac{1}{r}\partial_r\!\left(r\,\partial_r B_\theta\right) - \frac{B_\theta}{r^2} + \partial_{zz} B_\theta\right]$
 
 **Energy** (toy‑model internal energy handled via $p$; magnetic/kinetic diagnostics in Python).
