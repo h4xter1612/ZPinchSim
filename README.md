@@ -301,7 +301,6 @@ python pyscripts\diagnostics.py --run-dir .\data\stable_ref_2p5d --field p --mod
 
 # Visualization presets
 python pyscripts/viz.py --run-dir ./data/sausage_m0_2p5d --field p --mode auto --amp-mode auto-logistic --logistic-power 1.8 --a-sat-frac 0.65 --sausage-bounds 0.60 1.60 --sausage-ksoft 6.0 --sausage-beta 0.95 --make-mp4 --fps 24
-python pyscripts/viz.py --run-dir ./data/kink_m1_2p5d    --field p --mode auto --amp-mode auto-logistic --logistic-power 1.6 --a-sat-frac 0.60 --make-mp4 --fps 24
 python pyscripts\viz.py --run-dir .\data\kink_m1_2p5d    --field p --mode auto --amp-mode auto-logistic --a-sat-frac 0.5 --make-mp4 --fps 24
 python pyscripts\viz.py --run-dir .\data\stable_ref_2p5d --field p --mode stable --make-mp4 --fps 24
 ```
