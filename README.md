@@ -55,7 +55,7 @@ $\partial_t \mathbf{B} = -\nabla \times \mathbf{E},\qquad \mathbf{E} = -\mathbf{
 **Azimuthal field $B_\theta$ update (axisymmetric advection–diffusion form)**  
 Discretized as a conservative advection in $(r,z)$ plus a resistive operator consistent with cylindrical geometry:
 
-$\partial_t B_\theta + \nabla\!\cdot(B_\theta \mathbf{v}_{rz}) + \frac{v_r}{r} B_\theta = \eta\,\left[\frac{1}{r}\partial_r\!\left(r\,\partial_r B_\theta\right) - \frac{B_\theta}{r^2} + \partial_{zz} B_\theta\right]$
+$\partial_t B_\theta + \nabla\!\cdot(B_\theta \mathbf{v}_{rz}) + \frac{v_r}{r} B_\theta = \eta\$ , $\left[\frac{1}{r}\partial_r\!\left(r\,\partial_r B_\theta\right) - \frac{B_\theta}{r^2} + \partial_{zz} B_\theta\right]$
 
 **Energy** (toy‑model internal energy handled via $p$; magnetic/kinetic diagnostics in Python).
 
