@@ -1,9 +1,45 @@
-// physics.cpp  — OpenMP-friendly (MSVC), sin 'omp simd', misma lógica numérica
+// =============================
+// physics.cpp — OpenMP-friendly (MSVC), no 'omp simd', identical numerics
+// =============================
+/**
+ * @file physics.cpp
+ * @brief 2D axisymmetric resistive MHD toy solver (r–z) core time integrator and helpers.
+ *
+ * @details
+ * ### Scope
+ * This translation unit implements:
+ *  - Problem initialization (equilibrium-like radial pressure from Bθ(r), standard tests).
+ *  - Optional injected axial flow profiles v_z(r).
+ *  - Randomized/controlled modal seeding for perturbations (m=0/1).
+ *  - Axisymmetric boundary conditions in r and selectable periodic/non-periodic BCs in z.
+ *  - A constrained-transport–like update for (Br, Bz) via the azimuthal electric field Eθ.
+ *  - An explicit advection-diffusion update for the azimuthal field Bθ.
+ *  - Directional Godunov sweeps (r then z) using slope-limited reconstructions and HLL fluxes.
+ *  - Selective KO (Kreiss–Oliger–like) smoothing near domain edges and a sponge layer.
+ *  - Lightweight diagnostics: energy in Bθ, amplitude of a chosen axial mode k, and CSV metrics.
+ *
+ * ### Geometry & Units
+ * - Cylindrical symmetry with azimuthal invariance (∂/∂θ = 0). State variables are cell-centered.
+ * - Grid geometry, strides, and ghost extents are provided by Fields::g.
+ * - Typical MHD units with μ₀ = 1; total pressure used in Riemann solves adds ½ Bθ² to p.
+ *
+ * ### Numerics (high level)
+ * - MUSCL-type reconstruction with slope limiters (Minmod/MC).
+ * - HLL fluxes in r and z; radial sweep uses conservative form for r-weighted fluxes.
+ * - CT-like update for (Br,Bz) using Eθ = −(v×B)_θ + η_CT(∂Bz/∂r − ∂Br/∂z).
+ * - Explicit Bθ advection + resistive diffusion in r and z with cylindrical corrections.
+ * - Explicit time stepping with adaptive dt from CFL using fast magnetosonic estimate.
+ *
+ * @note All parallel loops are guarded by a soft threshold to avoid oversubscription on small grids.
+ * @warning This is a pedagogical “toy” code; stability is improved by edge KO filters + sponge.
+ */
+
 #include "physics.hpp"
 #include "rsolver.hpp"
 #include "reconstruction.hpp"
 #include "io.hpp"
 #include "utils.hpp"
+
 #include <chrono>
 #include <sstream>
 #include <vector>
@@ -17,6 +53,7 @@
 #ifdef _OPENMP
   #include <omp.h>
 #else
+  // Fallback stubs to keep code single-source even without OpenMP.
   inline int omp_get_max_threads(){ return 1; }
   inline int omp_get_num_threads(){ return 1; }
   inline int omp_get_thread_num(){ return 0; }
@@ -26,16 +63,50 @@ namespace physics {
 
 static constexpr double PI = 3.141592653589793238462643383279502884;
 
+/**
+ * @brief Heuristic to decide if we should spawn OpenMP threads.
+ * @param Nr Number of physical radial cells (no ghosts).
+ * @param Nz Number of physical axial cells (no ghosts).
+ * @return True if (Nr*Nz) exceeds a soft threshold and OpenMP has >1 threads available.
+ * @note Prevents thread overhead from dominating small runs.
+ */
 static inline bool should_parallelize(std::size_t Nr, std::size_t Nz) {
-    const std::size_t Ncrit = 30000; // ~3e4 celdas
+    const std::size_t Ncrit = 30000; // ~3e4 cells
     return (Nr * Nz) >= Ncrit && omp_get_max_threads() > 1;
 }
 static constexpr int OMP_CHUNK = 16;
 
-// -------------------- Inicialización del problema --------------------
+// ============================================================================
+// Problem initialization
+// ============================================================================
+
+/**
+ * @brief Construct initial state: background Bz, prescribed Bθ(r), pressure p(r) from radial balance.
+ *
+ * @details
+ * The azimuthal magnetic field Bθ(r) is prescribed as:
+ * \f[
+ *   B_\theta(r) = B_{\theta0} \frac{x}{1+x^2}, \quad x = \frac{r}{R_0}.
+ * \f]
+ * A radially varying pressure is then integrated from \f$r=0\f$ by discretizing the MHD
+ * radial balance (neglecting inertia at t=0):
+ * \f[
+ *   \frac{dp}{dr} + B_\theta \frac{dB_\theta}{dr} + \frac{B_\theta^2}{r} = 0,
+ * \f]
+ * using first/central differences and a mild smoothing pass to remove staircasing.
+ * Density is uniform and velocities are zeroed, except for later optional v_z injection.
+ *
+ * For selected test problems (e.g., "blast", "brio_wu") this routine overrides parts
+ * of the above to match canonical initial conditions in z.
+ *
+ * @param F   In/out field arrays to be filled at all (r,z) including ghosts.
+ * @param cfg Run-wide configuration (Bz0 used here).
+ * @param mhd Physics configuration (problem selection, γ, etc.).
+ */
 static void init_problem(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhd){
     const auto& g = F.g;
 
+    // --- Baseline “equilibrium-like” profile parameters (toy) ---
     const double rho0  = 1.0;
     const double p_axis= 1.0e-2;
     const double R0    = 0.3 * g.Rmax;
@@ -46,15 +117,18 @@ static void init_problem(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhd
     const std::size_t NzT = g.size_z();
     std::vector<double> rcoord(NrT, 0.0), Bth_r(NrT, 0.0), p_r(NrT, 0.0);
 
+    // Cell-center radii (ghosts included)
     for (std::size_t i=0; i<NrT; ++i){
         rcoord[i] = (int(i)-int(g.Ng)+0.5)*g.dr;
     }
+    // Prescribed Bθ(r)
     for (std::size_t i=0; i<NrT; ++i){
         const double r = std::fabs(rcoord[i]);
         const double x = r / (R0 + 1e-12);
         Bth_r[i] = Bth0 * (x / (1.0 + x*x));
     }
 
+    // Integrate dp/dr from the axis using the discretized balance
     p_r[0] = p_axis;
     auto dBth_dr = [&](std::size_t i)->double{
         if (i==0)         return (Bth_r[1] - Bth_r[0]) / g.dr;
@@ -70,14 +144,15 @@ static void init_problem(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhd
         const double dp = ( - Bm*dBdr - B2_r ) * (rC - rL);
         p_r[i] = std::max(1e-8, p_r[i-1] + dp);
     }
-    {   // suavizado leve
+    // Mild smoothing to reduce small oscillations
+    {
         std::vector<double> tmp = p_r;
         for (std::size_t i=1; i+1<NrT; ++i){
             p_r[i] = 0.25*tmp[i-1] + 0.5*tmp[i] + 0.25*tmp[i+1];
         }
     }
 
-    // 2D
+    // Fill 2D arrays from 1D profiles (and/or selected tests)
     if (should_parallelize(g.Nr, g.Nz)) {
         #pragma omp parallel
         {
@@ -112,6 +187,7 @@ static void init_problem(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhd
         }
     }
 
+    // Override for named problems (standard tests)
     if (mhd.problem=="blast"){
         if (should_parallelize(g.Nr, g.Nz)) {
             #pragma omp parallel
@@ -184,11 +260,12 @@ static void init_problem(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhd
         }
     }
 
-    {   // diagnóstico balance radial — extendido
+    // ---- Extended radial-balance diagnostics (for sanity checking) ----
+    {
         double resid_L2 = 0.0, norm_L2 = 0.0, resid_Linf = 0.0;
         double dpdr_min = +1e300, dpdr_max = -1e300;
 
-        // Pico de Btheta y su radio
+        // Location of |Bθ| peak (proxy for current ring)
         double Bth_abs_max = 0.0;
         std::size_t i_Bth_max = 0;
         for (std::size_t i = 0; i < NrT; ++i){
@@ -197,12 +274,11 @@ static void init_problem(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhd
         }
         const double r_Bth_max = (int(i_Bth_max) - int(g.Ng) + 0.5) * g.dr;
 
-        // Acumuladores para normas y rangos
         for (std::size_t i = 1; i + 1 < NrT; ++i){
             const double r    = std::max(std::fabs(rcoord[i]), 0.5 * g.dr);
             const double dpdr = (p_r[i+1] - p_r[i-1]) / (2.0 * g.dr);
             const double dBdr = (Bth_r[i+1] - Bth_r[i-1]) / (2.0 * g.dr);
-            const double R    = dpdr + Bth_r[i]*dBdr + (Bth_r[i]*Bth_r[i]) / r; // equilibrio radial
+            const double R    = dpdr + Bth_r[i]*dBdr + (Bth_r[i]*Bth_r[i]) / r; // residual
 
             resid_L2   += R*R;
             norm_L2    += dpdr*dpdr;
@@ -215,34 +291,34 @@ static void init_problem(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhd
         norm_L2  = std::sqrt(norm_L2  / N);
         const double rel_L2 = (norm_L2 > 0.0) ? (resid_L2 / norm_L2) : 0.0;
 
-        // Parámetros en el centro (i_c ~ radio medio)
+        // Characteristic speeds near the “center”
         const std::size_t ic = g.Ng + g.Nr/2;
         const double p0   = p_r[ic];
-        const double rhoC = rho0; // consistente con arriba
+        const double rhoC = rho0;
         const double cs0  = std::sqrt(std::max(0.0, mhd.gamma * p0 / std::max(1e-12, rhoC)));
         const double B2_0 = cfg.phys.Bz0*cfg.phys.Bz0 + Bth_r[ic]*Bth_r[ic];
         const double vA0  = std::sqrt(B2_0 / std::max(1e-12, rhoC));
         const double cf0  = std::sqrt(cs0*cs0 + vA0*vA0);
-        const double beta0= (B2_0 > 0.0) ? (2.0 * p0 / B2_0) : 0.0; // μ0=1 en unidades MHD típicas
+        const double beta0= (B2_0 > 0.0) ? (2.0 * p0 / B2_0) : 0.0;
 
-        // Estimación de CFL inicial (v≈0 al inicio)
+        // Initial CFL estimate (v≈0 at t=0)
         const double hmin     = std::min(g.dr, g.dz);
         const double denom    = std::max(1e-12, cf0);
         const double dt_cfl0  = mhd.cfl * hmin / denom;
 
-        // Info de malla
+        // Mesh info
         std::cerr << std::setprecision(6) << std::scientific;
         std::cerr << "[INIT] grid: Nr=" << g.Nr << " Nz=" << g.Nz
                   << " dr=" << g.dr << " dz=" << g.dz
                   << " Rmax=" << g.Rmax << " Zmax=" << g.Zmax << "\n";
 
-        // Equilibrio
+        // Balance diagnostics
         std::cerr << "[INIT] radial_balance_L2=" << resid_L2
                   << " (norm=" << norm_L2 << ", rel=" << rel_L2 << ")\n";
         std::cerr << "[INIT] radial_balance_Linf=" << resid_Linf << "\n";
         std::cerr << "[INIT] dp/dr range = [" << dpdr_min << ", " << dpdr_max << "]\n";
 
-        // Campos y termodinámica
+        // Fields & thermodynamics
         std::cerr << "[INIT] center: p0=" << p0
                   << " Bz0=" << cfg.phys.Bz0
                   << " Bth0=" << Bth_r[ic]
@@ -251,16 +327,30 @@ static void init_problem(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhd
                   << " vA0=" << vA0
                   << " cf0=" << cf0 << "\n";
 
-        // Geometría de Bθ
+        // Bθ geometry
         std::cerr << "[INIT] Bth_peak=" << Bth_abs_max
                   << " at r=" << r_Bth_max << " (R0=" << R0 << ")\n";
 
-        // Sugerencia de paso inicial por CFL
-        std::cerr << "[INIT] CFL(dt0) ~ " << dt_cfl0 << "  (v~0, usando cf0)\n";
+        // Suggested initial dt by CFL
+        std::cerr << "[INIT] CFL(dt0) ~ " << dt_cfl0 << "  (v≈0, using cf0)\n";
     }
 }
 
-// --- NEW: perfiles v_z(r) inyectados tras init_problem ---
+/**
+ * @brief Inject an axial flow profile v_z(r) after initialization.
+ *
+ * @details
+ * Two optional shapes (set by mhd.flow.type):
+ *  - "linear":   v_z(r) = v0 · min(|r|,R0)/R0
+ *  - "localized":v_z(r) = v0 · exp(-0.5 ((r-R0)/σ)^2)
+ *
+ * Here v0 is specified in units of local sound speed at the domain center:
+ *   v0 = (mhd.flow.v0) * c_s(center). The profile is copied uniformly along z.
+ *
+ * @param F    In/out fields (vz is modified).
+ * @param cfg  Unused here (kept for symmetry).
+ * @param mhd  Flow parameters (enable/type/v0/r0_frac/sigma_frac).
+ */
 static void apply_vz_profile(Fields& F, [[maybe_unused]] const RunConfig& cfg, const MHD2DConfig& mhd){
     const auto& g = F.g;
     if (mhd.flow.type=="off" || std::abs(mhd.flow.v0)<=0.0) return;
@@ -314,17 +404,45 @@ static void apply_vz_profile(Fields& F, [[maybe_unused]] const RunConfig& cfg, c
     }
 }
 
+// ============================================================================
+// Small utilities (edge treatment, KO filters, etc.)
+// ============================================================================
+
+/**
+ * @brief Optional wave-speed capping for stability experiments.
+ * @param vmax_raw Measured characteristic + flow speed.
+ * @param vmax_guard If >0, returns min(vmax_raw, vmax_guard); otherwise returns vmax_raw.
+ */
 static inline double cap_wave_speed(double vmax_raw, double vmax_guard){
     if (vmax_guard <= 0.0) return vmax_raw;
     return std::min(vmax_raw, vmax_guard);
 }
 
+/**
+ * @brief Zero out reconstructed slopes near edges (indices [L,R) in 1D buffer).
+ * @param darr Slope array to modify.
+ * @param L    Left bound (inclusive).
+ * @param R    Right bound (exclusive).
+ * @note Helps to avoid spurious overshoots at ghost-adjacent interfaces.
+ */
 static inline void kill_edge_slopes(std::vector<double>& darr, std::size_t L, std::size_t R){
     if (R <= L) return;
     if (R - L >= 4) { darr[L+0] = 0.0; darr[R-1] = 0.0; }
     else { for (std::size_t q=L; q<R; ++q) darr[q] = 0.0; }
 }
 
+/**
+ * @brief Apply a localized KO (5-point) filter near r-edges for several fields.
+ * @param F  In/out fields (rho, vr, vz, p, Br, Bz, Bth filtered).
+ * @param dt Time step size (scales viscosity).
+ * @param fac Non-dimensional strength (default 0.012).
+ * @details
+ * The discrete operator along r for a fixed k is:
+ * \f[
+ *  \nu \,(-1, 4, -6, 4, -1) \star A(i)
+ * \f]
+ * applied only to two cells next to each physical boundary (if available).
+ */
 static inline void ko_filter_edges_r(Fields& F, double dt, double fac=0.012){
     const auto& g = F.g;
     if (g.Nr < 8) return;
@@ -356,11 +474,17 @@ static inline void ko_filter_edges_r(Fields& F, double dt, double fac=0.012){
     apply_ko(F.Bth);
 }
 
+/**
+ * @brief Apply a localized KO (5-point) filter near z-edges for selected fields.
+ * @param F  In/out fields (rho, vr, vz filtered here).
+ * @param dt Time step size (scales viscosity).
+ * @param fac Non-dimensional strength (default 0.012).
+ */
 static inline void ko_filter_edges_z(Fields& F, double dt, double fac=0.012){
     const auto& g = F.g;
     if (g.Nz < 8) return;
     const double h  = g.dz;
-    const double nu = fac * dt / (h + 1e-12);
+       const double nu = fac * dt / (h + 1e-12);
 
     auto apply_ko = [&](std::vector<double>& A){
         std::vector<double> B = A;
@@ -380,6 +504,23 @@ static inline void ko_filter_edges_z(Fields& F, double dt, double fac=0.012){
     apply_ko(F.vz);
 }
 
+/**
+ * @brief Seed user-controlled perturbation modes (m=0,1) in vr and/or Bθ.
+ *
+ * @details
+ * For a given axial wavenumber k, phase φ = k z, and radial envelope
+ * \f$ \mathrm{shape}_r = \exp\{-r^2/R_0^2\} \f$, we add:
+ *  - If seed_vr:
+ *    - m=0: vr += ε · shape_r · cos(φ)
+ *    - m=1: vr1c += ε · (r/R0) · shape_r · cos(φ)   (stored in m=1 cosine slot)
+ *  - If seed_bth:
+ *    - m=0: Bθ *= (1 + 0.1ε · cos(φ))
+ *    - m=1: Bθ1c += 0.1ε · Bθ · cos(φ)               (stored in m=1 cosine slot)
+ *
+ * @param F   In/out fields (vr, Bth or their m=1 components modified).
+ * @param cfg Unused (kept for symmetry with other hooks).
+ * @param m   Modal seeding parameters (enable, m, k, ε, r0_frac).
+ */
 static void seed_modes(Fields& F, [[maybe_unused]] const RunConfig& cfg, const MHD2DConfig& m){
     if (!m.modes.enable || (m.modes.eps<=0.0)) return;
     const auto& g = F.g;
@@ -456,6 +597,18 @@ static void seed_modes(Fields& F, [[maybe_unused]] const RunConfig& cfg, const M
     }
 }
 
+// ============================================================================
+// Boundary conditions and source-like terms
+// ============================================================================
+
+/**
+ * @brief Axis boundary conditions in r (wall at iL, outflow-like at iR).
+ *
+ * @details
+ * - At inner wall: vr=0, Br=0, Bθ=0; copy-outflow for (vz,p,ρ,Bz).
+ * - At outer edge: vr=0, Br=0; copy-outflow for (vz,p,ρ,Bz,Bθ).
+ * This is a simple, robust set of conditions for the toy problem.
+ */
 static inline void apply_bc_r(Fields& F){
     const auto& g = F.g;
     const std::size_t iL = g.Ng, iR = g.Ng + g.Nr - 1;
@@ -467,6 +620,7 @@ static inline void apply_bc_r(Fields& F){
         F.p  [g.idx(iL,k)] = F.p [g.idx(iL+1,k)];
         F.rho[g.idx(iL,k)] = F.rho[g.idx(iL+1,k)];
         F.Bz [g.idx(iL,k)] = F.Bz[g.idx(iL+1,k)];
+
         F.vr [g.idx(iR,k)] = 0.0;
         F.vz [g.idx(iR,k)] = F.vz[g.idx(iR-1,k)];
         F.p  [g.idx(iR,k)] = F.p [g.idx(iR-1,k)];
@@ -477,6 +631,17 @@ static inline void apply_bc_r(Fields& F){
     }
 }
 
+/**
+ * @brief Axisymmetric geometric source for vr from hoop-stress term (Bθ²/r)/ρ.
+ * @param F  In/out fields (vr incremented).
+ * @param dt Time increment.
+ *
+ * @details Adds:
+ * \f[
+ *   \Delta v_r \leftarrow \Delta t \,\frac{B_\theta^2}{r\,\rho}.
+ * \f]
+ * A minimal stabilizing source capturing inward/outward Lorentz forcing from Bθ curvature.
+ */
 static inline void apply_axisym_sources(Fields& F, double dt){
     const auto& g = F.g;
     for (std::size_t i=g.Ng; i<g.Ng+g.Nr; ++i){
@@ -491,6 +656,15 @@ static inline void apply_axisym_sources(Fields& F, double dt){
     }
 }
 
+/**
+ * @brief Sponge layer near outer r and endcaps in z; exponential damping of all components.
+ * @param F   In/out fields.
+ * @param cfg Unused (reserved).
+ * @param m   Unused (reserved).
+ * @param dt  Time step for scaling the damping factor.
+ *
+ * @details Damping factor is exp(-α f dt), where f∈[0,1] increases quadratically into the sponge.
+ */
 static inline void apply_sponge(Fields& F, [[maybe_unused]] const RunConfig& cfg, [[maybe_unused]] const MHD2DConfig& m, double dt){
     const auto& g = F.g;
     const double Rcut   = 0.88 * g.Rmax;
@@ -524,6 +698,11 @@ static inline void apply_sponge(Fields& F, [[maybe_unused]] const RunConfig& cfg
     }
 }
 
+/**
+ * @brief z-boundary conditions: periodic copy or Neumann copy-outflow into ghosts.
+ * @param F         In/out fields.
+ * @param periodic  If true, wrap-around (periodic); else extrapolate edge values.
+ */
 static inline void apply_bc_z(Fields& F, bool periodic){
     const auto& g = F.g;
     const std::size_t kL = g.Ng, kR = g.Ng + g.Nz - 1;
@@ -539,6 +718,7 @@ static inline void apply_bc_z(Fields& F, bool periodic){
                 F.Br [g.idx(i,kghostL)] = F.Br [g.idx(i,ksrcL)];
                 F.Bz [g.idx(i,kghostL)] = F.Bz [g.idx(i,ksrcL)];
                 F.Bth[g.idx(i,kghostL)] = F.Bth[g.idx(i,ksrcL)];
+
                 F.rho[g.idx(i,kghostR)] = F.rho[g.idx(i,ksrcR)];
                 F.vr [g.idx(i,kghostR)] = F.vr [g.idx(i,ksrcR)];
                 F.vz [g.idx(i,kghostR)] = F.vz [g.idx(i,ksrcR)];
@@ -557,6 +737,7 @@ static inline void apply_bc_z(Fields& F, bool periodic){
                 F.Br [g.idx(i,kghostL)] = F.Br [g.idx(i,kL)];
                 F.Bz [g.idx(i,kghostL)] = F.Bz [g.idx(i,kL)];
                 F.Bth[g.idx(i,kghostL)] = F.Bth[g.idx(i,kL)];
+
                 F.rho[g.idx(i,kghostR)] = F.rho[g.idx(i,kR)];
                 F.vr [g.idx(i,kghostR)] = F.vr [g.idx(i,kR)];
                 F.vz [g.idx(i,kghostR)] = F.vz [g.idx(i,kR)];
@@ -569,6 +750,30 @@ static inline void apply_bc_z(Fields& F, bool periodic){
     }
 }
 
+// ============================================================================
+// Magnetic updates: Bθ advection-diffusion; CT-like update for (Br,Bz)
+// ============================================================================
+
+/**
+ * @brief Explicit update of Bθ with upwind advection and resistive diffusion in r and z.
+ *
+ * @param F          In/out fields (Bth updated in place).
+ * @param dt         Time step.
+ * @param eta_theta  Resistivity-like coefficient for Bθ diffusion.
+ * @param periodic_z Unused in current stencil (kept for symmetry).
+ *
+ * @details
+ * The update follows (schematically):
+ * \f[
+ *   B_\theta^{n+1} = B_\theta^n
+ *     - \Delta t \left[\nabla\cdot(\mathbf{v} B_\theta)\right]
+ *     + \Delta t \,\eta_\theta \left( \nabla^2 B_\theta - \frac{B_\theta}{r^2}
+ *                                     + \frac{1}{r}\frac{\partial}{\partial r}
+ *                                       \left(r \frac{\partial B_\theta}{\partial r}\right)\right)
+ * \f]
+ * where the cylindrical corrections are included via discrete terms (lap_r + lap_z).
+ * Advection uses simple face upwinding with arithmetic-averaged velocities.
+ */
 static void update_Btheta_axisym(Fields& F, double dt, double eta_theta, bool periodic_z){
     (void)periodic_z;
     const auto& g = F.g;
@@ -581,6 +786,7 @@ static void update_Btheta_axisym(Fields& F, double dt, double eta_theta, bool pe
         for (std::size_t k=g.Ng; k<g.Ng+g.Nz; ++k){
             const std::size_t id = g.idx(i,k);
 
+            // Upwinded advection
             double vr_L = 0.5*(F.vr[g.idx(i-1,k)] + F.vr[g.idx(i,k)]);
             double vr_R = 0.5*(F.vr[g.idx(i,k)]   + F.vr[g.idx(i+1,k)]);
             double vz_D = 0.5*(F.vz[g.idx(i,k-1)] + F.vz[g.idx(i,k)]);
@@ -598,6 +804,7 @@ static void update_Btheta_axisym(Fields& F, double dt, double eta_theta, bool pe
 
             double adv = (Fr_R - Fr_L)/g.dr + (Fz_U - Fz_D)/g.dz + F.Bth[id]*F.vr[id]*rinv;
 
+            // Diffusion with cylindrical correction
             double BrL = F.Bth[g.idx(i-1,k)], Bc = F.Bth[id], BrR = F.Bth[g.idx(i+1,k)];
             double BzD = F.Bth[g.idx(i,k-1)], BzU = F.Bth[g.idx(i,k+1)];
             double dBdr_L = (Bc - BrL)/g.dr;
@@ -614,12 +821,34 @@ static void update_Btheta_axisym(Fields& F, double dt, double eta_theta, bool pe
     F.Bth.swap(Bth_new);
 }
 
+/**
+ * @brief CT-like update for (Br, Bz) using the azimuthal electric field Eθ.
+ *
+ * @param F          In/out fields (Br,Bz updated).
+ * @param cfg        Unused here (symmetry).
+ * @param dt         Time step.
+ * @param eta_ct     Resistive term weight in Eθ.
+ * @param periodic_z Pass-through to z-BC application after the update.
+ *
+ * @details
+ * Discretization mirrors Faraday’s law in cylindrical form (axisymmetric):
+ * \f[
+ *   \partial_t B_r = -\partial_z E_\theta, \qquad
+ *   \partial_t B_z = \frac{1}{r} \partial_r ( r E_\theta ).
+ * \f]
+ * with
+ * \f[
+ *   E_\theta = - (v \times B)_\theta + \eta_{ct}\left(\frac{\partial B_z}{\partial r} - \frac{\partial B_r}{\partial z}\right).
+ * \f]
+ * Centered approximations are used consistently with the storage layout.
+ */
 static void ct_update(Fields& F, [[maybe_unused]] const RunConfig& cfg, double dt, double eta_ct, bool periodic_z){
     (void)cfg;
     const auto& g = F.g;
     std::vector<double> E(g.size_r()*g.size_z(), 0.0);
     auto Eidx = [&](std::size_t i, std::size_t k){ return g.idx(i,k); };
 
+    // Build Eθ at centers
     for (std::size_t i=g.Ng; i<g.Ng+g.Nr; ++i){
         for (std::size_t k=g.Ng; k<g.Ng+g.Nz; ++k){
             double vr = F.vr[g.idx(i,k)];
@@ -636,6 +865,7 @@ static void ct_update(Fields& F, [[maybe_unused]] const RunConfig& cfg, double d
         }
     }
 
+    // Update Br, Bz
     std::vector<double> Br_new(F.Br), Bz_new(F.Bz);
     for (std::size_t i=g.Ng; i<g.Ng+g.Nr; ++i){
         double r = (int(i)-int(g.Ng)+0.5)*g.dr;
@@ -655,6 +885,7 @@ static void ct_update(Fields& F, [[maybe_unused]] const RunConfig& cfg, double d
     F.Br.swap(Br_new);
     F.Bz.swap(Bz_new);
 
+    // Neumann copies in r-ghosts for (Br,Bz), then enforce z-BCs
     for (std::size_t k=0;k<g.size_z();++k){
         F.Br[g.idx(g.Ng,k)]                       = F.Br[g.idx(g.Ng+1,k)];
         F.Br[g.idx(g.size_r()-g.Ng-1,k)]         = F.Br[g.idx(g.size_r()-g.Ng-2,k)];
@@ -664,6 +895,30 @@ static void ct_update(Fields& F, [[maybe_unused]] const RunConfig& cfg, double d
     apply_bc_z(F, periodic_z);
 }
 
+// ============================================================================
+// Directional sweeps (Godunov): r-sweep and z-sweep
+// ============================================================================
+
+/**
+ * @brief Godunov sweep along r with cylindrical conservative update (r-weighted fluxes).
+ *
+ * @param F     In/out fields (ρ, vr, vz, p updated).
+ * @param cfg   Unused here.
+ * @param gamma Ratio of specific heats (γ).
+ * @param lim   Slope limiter for reconstruction (Minmod/MC).
+ * @param dt    Time step.
+ *
+ * @details
+ * - Reconstruct MUSCL left/right states for (ρ, vr, vz, p+½Bθ², Br, Bz).
+ * - Compute HLL fluxes in r using rsolver::hll_r; set magnetic fluxes (Br,Bz) to zero
+ *   to avoid double-updating them (they are advanced by CT).
+ * - Conservative update integrates r-weighted fluxes:
+ *   \f[
+ *     r U^{n+1} = r U^{n} - \frac{\Delta t}{\Delta r} \big( r_{i+1/2} F_{i+1/2}
+ *                    - r_{i-1/2} F_{i-1/2} \big).
+ *   \f]
+ * - Convert back to primitives; apply simple floors and velocity clamps.
+ */
 static void mhd_sweep_r(Fields& F, [[maybe_unused]] const RunConfig& cfg, double gamma,
                         recon::Limiter lim, double dt){
     (void)cfg;
@@ -681,17 +936,19 @@ static void mhd_sweep_r(Fields& F, [[maybe_unused]] const RunConfig& cfg, double
             for (int kk=int(k0); kk<int(k1); ++kk){
                 std::vector<double> rho(g.size_r()), vr(g.size_r()), vz(g.size_r()),
                                     p(g.size_r()),   Br(g.size_r()), Bz(g.size_r()), Bth(g.size_r());
+                // Gather line
                 for (std::size_t i=i0; i<i1; ++i){
                     const std::size_t id = g.idx(i,std::size_t(kk));
                     rho[i] = std::max(1e-12, F.rho[id]);
                     vr[i]  = F.vr[id];
                     vz[i]  = F.vz[id];
-                    p[i]   = std::max(1e-12, F.p[id] + 0.5*F.Bth[id]*F.Bth[id]);
+                    p[i]   = std::max(1e-12, F.p[id] + 0.5*F.Bth[id]*F.Bth[id]); // add ½Bθ²
                     Br[i]  = F.Br[id];
                     Bz[i]  = F.Bz[id];
                     Bth[i] = F.Bth[id];
                 }
 
+                // Slopes
                 std::vector<double> drho,dvr,dvz,dpv,dBr,dBz;
                 recon::slope_limited(rho, drho, i0, i1, lim);
                 recon::slope_limited(vr,  dvr,  i0, i1, lim);
@@ -707,6 +964,7 @@ static void mhd_sweep_r(Fields& F, [[maybe_unused]] const RunConfig& cfg, double
                 kill_edge_slopes(dBr,  i0, i1);
                 kill_edge_slopes(dBz,  i0, i1);
 
+                // Interfaces
                 std::vector<double> rhoL,rhoR, vrL,vrR, vzL,vzR, pL,pR, BrL,BrR, BzL,BzR;
                 recon::interfaces_lr(rho, drho, rhoL, rhoR, i0, i1);
                 recon::interfaces_lr(vr,  dvr,  vrL,  vrR,  i0, i1);
@@ -715,15 +973,17 @@ static void mhd_sweep_r(Fields& F, [[maybe_unused]] const RunConfig& cfg, double
                 recon::interfaces_lr(Br,  dBr,  BrL,  BrR,  i0, i1);
                 recon::interfaces_lr(Bz,  dBz,  BzL,  BzR,  i0, i1);
 
+                // HLL fluxes at faces (Br,Bz fluxes nulled; CT owns B-updates)
                 const std::size_t f0 = i0, f1 = i1 - 1;
                 std::vector<rsolver::Flux> FH(g.size_r());
                 for (std::size_t f=f0; f<f1; ++f){
                     rsolver::MHDPrim WL{rhoR[f], vrR[f], vzR[f], pR[f], BrR[f], BzR[f]};
                     rsolver::MHDPrim WR{rhoL[f+1], vrL[f+1], vzL[f+1], pL[f+1], BrL[f+1], BzL[f+1]};
                     rsolver::hll_r(gamma, WL, WR, FH[f]);
-                    FH[f][4]=0.0; FH[f][5]=0.0;
+                    FH[f][4]=0.0; FH[f][5]=0.0; // zero magnetic fluxes here
                 }
 
+                // Conservative update (r-weighted)
                 for (std::size_t i=i0+1; i+1<i1; ++i){
                     const std::size_t id = g.idx(i,std::size_t(kk));
                     double r   = (int(i)-int(g.Ng)+0.5)*g.dr;
@@ -746,6 +1006,7 @@ static void mhd_sweep_r(Fields& F, [[maybe_unused]] const RunConfig& cfg, double
                     }
                     rsolver::cons_to_prim(gamma, U, W);
 
+                    // Floors and clamps
                     const double rho_floor=1e-6, p_floor=1e-6;
                     W.rho = std::max(W.rho, rho_floor);
                     W.p   = std::max(W.p,   p_floor);
@@ -755,7 +1016,7 @@ static void mhd_sweep_r(Fields& F, [[maybe_unused]] const RunConfig& cfg, double
                     F.rho[id]=W.rho; F.vr[id]=W.vr; F.vz[id]=W.vz; F.p[id]=W.p;
                 }
 
-                // ghosts en r
+                // Simple r-ghost copies (consistent with apply_bc_r after full sweep)
                 F.rho[g.idx(i0,std::size_t(kk))]   = F.rho[g.idx(i0+1,std::size_t(kk))];
                 F.rho[g.idx(i1-1,std::size_t(kk))] = F.rho[g.idx(i1-2,std::size_t(kk))];
                 F.vr [g.idx(i0,std::size_t(kk))]   = F.vr [g.idx(i0+1,std::size_t(kk))];
@@ -857,6 +1118,23 @@ static void mhd_sweep_r(Fields& F, [[maybe_unused]] const RunConfig& cfg, double
     }
 }
 
+/**
+ * @brief Godunov sweep along z (standard Cartesian conservative update).
+ *
+ * @param F          In/out fields (ρ, vr, vz, p updated).
+ * @param cfg        Unused.
+ * @param gamma      Ratio of specific heats (γ).
+ * @param lim        Slope limiter (Minmod/MC).
+ * @param dt         Time step.
+ * @param periodic_z If true, periodic BCs are applied in z at the end of each line update.
+ *
+ * @details
+ * Similar to the r-sweep but without cylindrical r-weighting:
+ * \f[
+ *   U^{n+1} = U^n - \frac{\Delta t}{\Delta z} (F_{k+1/2} - F_{k-1/2}).
+ * \f]
+ * Magnetic fluxes for (Br,Bz) are again nulled here; CT handles their evolution.
+ */
 static void mhd_sweep_z(Fields& F, [[maybe_unused]] const RunConfig& cfg, double gamma,
                         recon::Limiter lim, double dt, bool periodic_z){
     (void)cfg; (void)periodic_z;
@@ -874,6 +1152,7 @@ static void mhd_sweep_z(Fields& F, [[maybe_unused]] const RunConfig& cfg, double
             for (int ii=int(i0); ii<int(i1); ++ii){
                 std::vector<double> rho(g.size_z()), vr(g.size_z()), vz(g.size_z()),
                                     p(g.size_z()),   Br(g.size_z()), Bz(g.size_z());
+                // Gather column
                 for (std::size_t k=k0; k<k1; ++k){
                     const std::size_t id = g.idx(std::size_t(ii),k);
                     rho[k] = std::max(1e-12, F.rho[id]);
@@ -1016,7 +1295,15 @@ static void mhd_sweep_z(Fields& F, [[maybe_unused]] const RunConfig& cfg, double
     }
 }
 
-// -------------------- Diagnósticos --------------------
+// ============================================================================
+// Diagnostics
+// ============================================================================
+
+/**
+ * @brief Compute total magnetic energy stored in Bθ (integrated over volume).
+ * @param F Fields.
+ * @return \f$ \int \frac{1}{2} B_\theta^2 \, dV \f$ with \f$ dV = 2\pi r\, dr\, dz \f$.
+ */
 static double energy_Btheta(const Fields& F){
     const auto& g = F.g;
     double sum = 0.0;
@@ -1030,6 +1317,15 @@ static double energy_Btheta(const Fields& F){
     return sum;
 }
 
+/**
+ * @brief Axial mode amplitude integral for a scalar q (pressure or density).
+ *
+ * @param F    Fields (reads p or rho).
+ * @param k    Axial wavenumber.
+ * @param from "pressure" or anything else (then density).
+ * @return \f$ \int | \int q(r,z)\cos(kz)\,dz | \, 2\pi r\,dr \f$.
+ * @note A simple proxy for mode growth along z for axisymmetric projections.
+ */
 static double mode_amplitude_k(const Fields& F, double k, const std::string& from){
     if (k<=0.0) return 0.0;
     const auto& g = F.g;
@@ -1049,20 +1345,43 @@ static double mode_amplitude_k(const Fields& F, double k, const std::string& fro
     return Ak;
 }
 
-// -------------------- Driver principal --------------------
+// ============================================================================
+// Main driver
+// ============================================================================
+
+/**
+ * @brief Run the 2D axisymmetric MHD toy simulation until t_end.
+ *
+ * @param F       In/out fields (initialized here, advanced in time, then dumped).
+ * @param cfg     Run configuration (I/O cadence, output dir, background fields).
+ * @param mhdcfg  Physics & numerics configuration (γ, CFL, limiters, viscosities, etc.).
+ *
+ * @details
+ * Algorithmic skeleton per step:
+ *  1) Compute max wave speed (|v| + c_f) over the grid; set dt by CFL and dt_max.
+ *  2) Directional split:
+ *     - Full dt:  sweep_r → sweep_z → CT → Bθ update → sources → KO → BC_r → sponge → BC_z
+ *     - Half dt:  same sequence with 0.5·dt (Strang-like stabilization).
+ *  3) Periodically write snapshots, 2.5D m=1 projections, diag row, and metrics.
+ *
+ * Basic safeguards:
+ *  - NaN detection → write a debug frame and abort.
+ *  - Floors on ρ and p; clamps on velocities.
+ *  - KO edge filters and sponge layer to reduce spurious reflections.
+ */
 void run_2d_mhd_toy(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhdcfg){
     const auto& g = F.g;
     namespace fs = std::filesystem;
     fs::create_directories(cfg.out_dir + "/debug");
 
-    // ---- Inicialización de I/O rápido (una sola vez) ----
+    // Fast I/O init once
     {
         static bool io_inited = false;
         if (!io_inited) {
             std::ios::sync_with_stdio(false);
             std::cin.tie(nullptr);
             std::cout.tie(nullptr);
-            std::setvbuf(stdout, nullptr, _IOFBF, 1<<20); // 1 MiB buffer a stdout
+            std::setvbuf(stdout, nullptr, _IOFBF, 1<<20); // 1 MiB stdout buffer
             io_inited = true;
         }
     }
@@ -1081,10 +1400,12 @@ void run_2d_mhd_toy(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhdcfg){
         std::cout << "[OMP] Disabled (single-thread)\n";
     #endif
 
+    // Initial state + optional modifications
     init_problem(F, cfg, mhdcfg);
     apply_vz_profile(F, cfg, mhdcfg);
     seed_modes(F, cfg, mhdcfg);
 
+    // Initial dumps
     io::write_snapshot(F, cfg, /*step=*/0, /*t=*/0.0);
     double k_proj = (mhdcfg.modes.k > 0.0) ? mhdcfg.modes.k
                   : ((mhdcfg.k_diag > 0.0) ? mhdcfg.k_diag : 0.0);
@@ -1094,7 +1415,7 @@ void run_2d_mhd_toy(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhdcfg){
 
     recon::Limiter lim = (mhdcfg.limiter=="minmod") ? recon::Limiter::Minmod : recon::Limiter::MC;
 
-    // --- Archivo de métricas con búfer persistente ---
+    // Metrics file with persistent buffer
     std::ofstream metrics(cfg.out_dir + "/debug/2d_mhd_metrics.csv", std::ios::out);
     static std::vector<char> fbuf(1<<20);
     metrics.rdbuf()->pubsetbuf(fbuf.data(), static_cast<std::streamsize>(fbuf.size()));
@@ -1105,10 +1426,10 @@ void run_2d_mhd_toy(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhdcfg){
     double t = 0.0;
     int    step = 0;
 
-    // --- Barra de progreso ultra-ligera ---
+    // Ultra-light progress bar (throttled)
     auto t0 = std::chrono::steady_clock::now();
-    const int  PROG_EVERY = 100;                          // refresca cada N pasos
-    const auto UI_DT      = std::chrono::milliseconds(500); // y al menos cada 0.5 s
+    const int  PROG_EVERY = 100;                            // refresh every N steps
+    const auto UI_DT      = std::chrono::milliseconds(500); // and ≥0.5 s apart
     auto last_ui = t0;
 
     auto print_progress = [&](double frac, int step_, double t_sim, double dt_last, double vmax){
@@ -1116,12 +1437,11 @@ void run_2d_mhd_toy(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhdcfg){
         constexpr int W = 40;
         int filled = (int)std::lround(frac * W);
 
-        // ETA basado en tiempo transcurrido
+        // ETA from elapsed time and fraction
         auto now = std::chrono::steady_clock::now();
         double elapsed = std::chrono::duration<double>(now - t0).count();
         double eta = (frac > 1e-9) ? elapsed * (1.0 - frac) / frac : 0.0;
 
-        // Construcción de la barra y línea con snprintf
         static char bar[W+1];
         for (int i=0;i<W;i++) bar[i] = (i<filled ? '#' : '-');
         bar[W] = '\0';
@@ -1133,12 +1453,13 @@ void run_2d_mhd_toy(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhdcfg){
         int n = std::snprintf(buf, sizeof(buf),
             "\r[%s] %5.1f%%  t=%.2e  dt=%.2e  vmax=%.3g  ETA %02d:%02d:%02d  (step %d)",
             bar, 100.0*frac, t_sim, dt_last, vmax, h, m, s, step_);
-        if (n < 0) return; // por seguridad
+        if (n < 0) return;
 
-        std::fwrite(buf, 1, std::min<int>(n, (int)sizeof(buf)), stdout); // sin flush
+        std::fwrite(buf, 1, std::min<int>(n, (int)sizeof(buf)), stdout); // no flush
     };
 
     while (t < mhdcfg.t_end - 1e-16) {
+        // --- CFL-based dt ---
         double vmax_raw = 1e-6;
         for (std::size_t i=g.Ng; i<g.Ng+g.Nr; ++i){
             for (std::size_t k=g.Ng; k<g.Ng+g.Nz; ++k){
@@ -1164,7 +1485,7 @@ void run_2d_mhd_toy(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhdcfg){
         if (mhdcfg.dt_max > 0.0) dt = std::min(dt, mhdcfg.dt_max);
         dt = std::clamp(dt, 1e-12, mhdcfg.t_end - t);
 
-        // Paso completo + half-step con las mismas fases numéricas que ya tenías
+        // --- Directional splitting: full step ---
         mhd_sweep_r(F, cfg, mhdcfg.gamma, lim, dt);
         mhd_sweep_z(F, cfg, mhdcfg.gamma, lim, dt, periodic_z);
         ct_update(F, cfg, dt, mhdcfg.eta_ct, periodic_z);
@@ -1175,6 +1496,7 @@ void run_2d_mhd_toy(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhdcfg){
         apply_bc_r(F);
         apply_sponge(F, cfg, mhdcfg, dt);
 
+        // --- Directional splitting: half step (stabilization) ---
         mhd_sweep_r(F, cfg, mhdcfg.gamma, lim, 0.5*dt);
         mhd_sweep_z(F, cfg, mhdcfg.gamma, lim, 0.5*dt, periodic_z);
         ct_update(F, cfg, 0.5*dt, mhdcfg.eta_ct, periodic_z);
@@ -1187,18 +1509,18 @@ void run_2d_mhd_toy(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhdcfg){
 
         t += dt; step++;
 
-        // ---- Barra de progreso: throttle por tiempo + cada N pasos ----
+        // --- Progress bar (throttled) ---
         if (step % PROG_EVERY == 0) {
             auto now = std::chrono::steady_clock::now();
             if (now - last_ui >= UI_DT) {
                 double frac = (mhdcfg.t_end > 0.0) ? (t / mhdcfg.t_end) : 0.0;
                 print_progress(frac, step, t, dt, vmax_raw);
-                std::fflush(stdout);  // flush sólo cada UI_DT
+                std::fflush(stdout);
                 last_ui = now;
             }
         }
 
-        // ---- Seguridad/diagnóstico ----
+        // --- Safety/diagnostics ---
         if (utils::count_nans(F) > 0) {
             std::cerr << "\n[ABORT] NaNs at step " << step << ", t=" << t << "\n";
             utils::DebugFrame dbg;
@@ -1211,25 +1533,24 @@ void run_2d_mhd_toy(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhdcfg){
             break;
         }
 
-        // ---- Snapshots (los mantengo tal cual, según output_every) ----
+        // --- Snapshots ---
         if (step % cfg.output_every == 0){
             io::write_snapshot(F, cfg, step, t);
             io::write_snapshot_2p5D(F, cfg, step, t, k_proj);
             io::write_diag(cfg.out_dir, step, t, vmax_raw);
         }
 
-        // ---- Métricas (archivo con buffer, poco flush) ----
+        // --- Metrics ---
         if (step % mhdcfg.diag_every == 0){
             const double EBth = energy_Btheta(F);
             const double Ak   = mhdcfg.write_mode_amp ? mode_amplitude_k(F, mhdcfg.k_diag, mhdcfg.amp_from) : 0.0;
             metrics << std::setprecision(16)
                     << t << "," << utils::divB_L2(F) << "," << utils::total_energy(F,cfg)
                     << "," << EBth << "," << vmax_raw << "," << dt << "," << Ak << "\n";
-            // sin metrics.flush(); dejemos que el buffer haga su trabajo
         }
     }
 
-    // ---- Finalización: último snapshot y cierre prolijo ----
+    // Final dump & close
     io::write_snapshot(F, cfg, /*step=*/step, /*t=*/t);
     if (k_proj > 0.0) {
         io::write_snapshot_2p5D(F, cfg, /*step=*/0, /*t=*/0.0, k_proj);
@@ -1237,9 +1558,9 @@ void run_2d_mhd_toy(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhdcfg){
     metrics << std::setprecision(16) << t << "," << utils::divB_L2(F) << ","
             << utils::total_energy(F,cfg) << "," << energy_Btheta(F)
             << "," << 0.0 << "," << 0.0 << "," << 0.0 << "\n";
-    metrics.flush(); // flush final del archivo
+    metrics.flush();
 
-    std::fwrite("\n", 1, 1, stdout); // cerrar la línea de la barra
+    std::fwrite("\n", 1, 1, stdout); // newline to finish the progress line
     std::fflush(stdout);
 }
 

@@ -1,40 +1,64 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import argparse, re
+"""
+viz.py — Synthetic view rendering (kink/sausage/stable) and MP4 export.
+
+Key features:
+- Extended help appears automatically when no arguments are provided.
+- Reads fitted gamma from diagnostics (if available) or estimates it from early snapshots.
+- Global vmin/vmax estimation (fast sampling) with optional manual overrides and colormap.
+- Smooth "sausage" clamp (no hard edges) with tunable parameters.
+
+Reminder: run `python utils.py` first to ensure dependencies are installed.
+"""
+from __future__ import annotations
+import argparse, re, sys
 from pathlib import Path
+from typing import Optional, Tuple, List
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import imageio.v2 as imageio
 
-# ------------------ E/S ------------------
-def load_meta(meta_path: Path):
-    s = meta_path.read_text(encoding="utf-8")
-    # Formato: t=..., Nr=..., Nz=..., Ng=..., Rmax=..., Zmax=...
-    t   = float(re.search(r"t=([0-9eE\.\+\-]+)", s).group(1))
-    Nr,Nz,Ng = map(int, re.search(r"Nr=(\d+), Nz=(\d+), Ng=(\d+)", s).groups())
-    Rmax,Zmax = map(float, re.search(r"Rmax=([0-9eE\.\+\-]+), Zmax=([0-9eE\.\+\-]+)", s).groups())
-    return t,Nr,Nz,Ng,Rmax,Zmax
+# ------------------ I/O helpers ------------------
+_RE_T     = re.compile(r"t=([0-9eE\.\+\-]+)")
+_RE_NRNZ  = re.compile(r"Nr=(\d+), Nz=(\d+), Ng=(\d+)")
+_RE_RZMAX = re.compile(r"Rmax=([0-9eE\.\+\-]+), Zmax=([0-9eE\.\+\-]+)")
 
-def list_steps(run_dir: Path):
+def load_meta(meta_path: Path):
+    """Parse a meta file with lines like: t=..., Nr=..., Nz=..., Ng=..., Rmax=..., Zmax=..."""
+    s = meta_path.read_text(encoding="utf-8")
+    t   = float(_RE_T.search(s).group(1))
+    Nr,Nz,Ng = map(int, _RE_NRNZ.search(s).groups())
+    Rmax,Zmax= map(float, _RE_RZMAX.search(s).groups())
+    return t,Nz and Nr,Ng,Rmax,Zmax  # intentional unpack below to keep order explicit
+
+def list_steps(run_dir: Path) -> List[int]:
+    """Return sorted integer step indices found in run_dir."""
     steps=[]
     for p in run_dir.glob("fields_*_meta.txt"):
-        try: steps.append(int(p.stem.split("_")[1]))
-        except: pass
-    return sorted(steps)
+        try:
+            steps.append(int(p.stem.split("_")[1]))
+        except Exception:
+            pass
+    steps.sort()
+    return steps
 
 def load_field(run_dir: Path, step: int, field: str):
+    """Load the raw CSV array for a given field/step; None if missing."""
     p = run_dir / f"fields_{step}_{field}.csv"
     if not p.exists(): return None
     return np.loadtxt(p, delimiter=",", dtype=float)
 
 def reshape_center(vec, Nr, Nz, Ng):
+    """Strip guard cells in both dimensions and return the core (Nr x Nz)."""
     NrT, NzT = Nr + 2*Ng, Nz + 2*Ng
     A = np.asarray(vec, float).reshape(NrT, NzT)
     return A[Ng:Ng+Nr, Ng:Ng+Nz]
 
-def try_read_gamma_csv(run_dir: Path):
+def try_read_gamma_csv(run_dir: Path) -> Optional[float]:
+    """Read the last finite gamma from diagnostics_fit_gamma.csv if present."""
     p = run_dir / "diagnostics_fit_gamma.csv"
     if not p.exists(): return None
     try:
@@ -44,12 +68,16 @@ def try_read_gamma_csv(run_dir: Path):
             if len(row) >= 3:
                 g = float(row[2])
                 if np.isfinite(g): return g
-    except:
+    except Exception:
         return None
     return None
 
-# ---------- estimador de gamma (fallback) ----------
+# ---------- Gamma estimator (fallback) ----------
 def estimate_gamma_from_snaps(run_dir: Path, field: str, frac_core=0.35, frac_window=0.25):
+    """
+    Estimate growth rate gamma from early-time RMS inside a core radius.
+    Uses a simple log-linear fit over a window of early snapshots.
+    """
     steps = list_steps(run_dir)
     if len(steps) < 10: return None
     t0,Nr,Nz,Ng,Rmax,Zmax = load_meta(run_dir / f"fields_{steps[0]}_meta.txt")
@@ -83,11 +111,12 @@ def estimate_gamma_from_snaps(run_dir: Path, field: str, frac_core=0.35, frac_wi
         coef, *_ = np.linalg.lstsq(X, y, rcond=None)
         gamma = float(coef[1])
         return gamma if np.isfinite(gamma) else None
-    except:
+    except Exception:
         return None
 
-# ------------------ utilidades visuales ------------------
+# ------------------ Visualization utilities ------------------
 def interp_radial_linear(F0_rz, r_base, dr):
+    """Linear interpolation along radius for synthetic cross-sections."""
     Nr, Nz = F0_rz.shape
     ii = np.clip((r_base/dr - 0.5).astype(np.int64), 0, Nr-2)
     w  = np.clip((r_base - (ii+0.5)*dr)/dr, 0.0, 1.0)
@@ -98,13 +127,14 @@ def interp_radial_linear(F0_rz, r_base, dr):
     return (1.0 - w)*fL + w*fR
 
 def soft_clamp_sym(x, lo, hi, k=4.0):
-    # clamp suave simétrico con transición logística
+    """Smooth symmetric clamp using a logistic-like transition."""
     mid = 0.5*(lo+hi)
     sig = 1.0/(1.0 + np.exp(-k*(x - mid)))
     return lo + (hi-lo)*sig
 
-# ------------------ generadores de frames ------------------
+# ------------------ Frame generators ------------------
 def frame_kink(F0_rz, z, Rmax, a, k, c, t, x, dr):
+    """Kink-like lateral displacement of the core centerline."""
     x_c = a * np.cos(k*(z - c*t))[None, :]
     r_base = np.abs(x[:, None] - x_c)
     r_base = np.clip(r_base, 0.0, Rmax - 1e-12)
@@ -112,33 +142,31 @@ def frame_kink(F0_rz, z, Rmax, a, k, c, t, x, dr):
 
 def frame_sausage(F0_rz, z, Rmax, a, k, c, t, x, dr,
                   stretch_lo=0.75, stretch_hi=1.25, k_soft=4.0, beta=0.65):
+    """Sausage-like radial stretch/compression around the core radius."""
     R0 = 0.30 * Rmax
-    s_raw  = (a / (R0 + 1e-12)) * np.cos(k*(z - c*t))[None, :]   # (1, Nz)
+    s_raw  = (a / (R0 + 1e-12)) * np.cos(k*(z - c*t))[None, :]
     stretch_raw = 1.0 + s_raw
-    # clamp suave (sin esquinas duras)
     stretch = soft_clamp_sym(stretch_raw, stretch_lo, stretch_hi, k=k_soft)
-    # mapeo con exponente beta para realzar/atenuar el contraste radial
     r_eff = np.abs(x[:, None]) / np.power(stretch, beta)
     r_eff = np.clip(r_eff, 0.0, Rmax - 1e-12)
     return interp_radial_linear(F0_rz, r_eff, dr)
 
 def frame_stable(F0_rz, z, Rmax, x, dr):
+    """Stable reference (no axial modulation)."""
     r_base = np.clip(np.abs(x[:, None]), 0.0, Rmax - 1e-12)
     return interp_radial_linear(F0_rz, r_base, dr)
 
 def infer_mode_from_name(run_dir: Path, default_mode: str):
+    """Guess mode from folder name."""
     name = run_dir.name.lower()
     if "kink" in name: return "kink"
     if "sausage" in name: return "sausage"
     if "stable" in name or "ref" in name: return "stable"
     return default_mode
 
-# --------- evolución de amplitud ---------
+# --------- Amplitude evolution ---------
 def evolve_amplitude(times, a0_init, gamma, a_sat, p=1.0):
-    """
-    Integra a' = gamma * a * (1 - (a/a_sat)^p) sobre los tiempos dados.
-    Devuelve a(t_i) con a(t_0)=a0_init. p=1 -> logística clásica.
-    """
+    """Integrate a' = gamma*a*(1 - (a/a_sat)^p) along given times (explicit Euler)."""
     a = a0_init
     out = [a]
     t_prev = times[0]
@@ -151,21 +179,21 @@ def evolve_amplitude(times, a0_init, gamma, a_sat, p=1.0):
         t_prev = t
     return np.asarray(out, float)
 
-# ------------------ render de UN run ------------------
-def render_one_run(run_dir: Path, field: str, mode_arg: str, amp_mode: str, k_arg: float,
-                   a0_arg: float, gamma_arg: float, phase_speed: float,
-                   rview_arg: float, every: int, make_mp4: bool, fps: int, dpi: int,
-                   nx: int, t_ref_step: int, a_sat_frac: float,
+# ------------------ Single-run renderer ------------------
+def render_one_run(run_dir: Path, field: str, mode_arg: str, amp_mode: str, k_arg: Optional[float],
+                   a0_arg: Optional[float], gamma_arg: float, phase_speed: float,
+                   rview_arg: Optional[float], every: int, make_mp4: bool, fps: int, dpi: int,
+                   nx: int, t_ref_step: Optional[int], a_sat_frac: float,
                    auto_core_frac: float, auto_window_frac: float,
-                   sausage_bounds: tuple, sausage_ksoft: float, sausage_beta: float,
-                   logistic_power: float):
+                   sausage_bounds: Tuple[float,float], sausage_ksoft: float, sausage_beta: float,
+                   logistic_power: float, cmap: str, vmin_user: Optional[float], vmax_user: Optional[float]):
 
     steps = list_steps(run_dir)
     if not steps:
-        print(f"[WARN] No hay snapshots en {run_dir}")
+        print(f"[WARN] No snapshots in {run_dir}")
         return
 
-    # t0
+    # Choose a reference meta (explicit step if provided)
     if (t_ref_step is not None) and (t_ref_step in steps):
         t0, Nr, Nz, Ng, Rmax, Zmax = load_meta(run_dir / f"fields_{t_ref_step}_meta.txt")
     else:
@@ -177,12 +205,12 @@ def render_one_run(run_dir: Path, field: str, mode_arg: str, amp_mode: str, k_ar
     Rview = rview_arg if rview_arg is not None else 1.05*Rmax
     x = np.linspace(-Rview, Rview, nx)
 
-    # modo (auto por nombre si así se pidió)
+    # Mode (auto by folder name if requested)
     mode = mode_arg
     if mode == "auto":
         mode = infer_mode_from_name(run_dir, "kink")
 
-    # gamma base
+    # Growth rate
     if mode == "stable":
         gamma_use = 0.0
     else:
@@ -192,12 +220,12 @@ def render_one_run(run_dir: Path, field: str, mode_arg: str, amp_mode: str, k_ar
                                                   frac_core=auto_core_frac,
                                                   frac_window=auto_window_frac) or 0.0
 
-    # amplitud inicial y saturación
+    # Amplitude initial value and saturation cap
     a0_default = 0.1*Rmax
     a0_base = a0_arg if (amp_mode == "fixed" and a0_arg is not None) else max(3.0*dr, 0.10*(0.30*Rmax))
-    a_sat = a_sat_frac * Rmax  # saturación geométrica
+    a_sat = a_sat_frac * Rmax
 
-    # vlims globales
+    # Global color limits via sampling (unless user overrides)
     vals = []
     pick = max(1, len(steps)//30)
     for s in steps[::pick]:
@@ -206,11 +234,12 @@ def render_one_run(run_dir: Path, field: str, mode_arg: str, amp_mode: str, k_ar
         F0rz = reshape_center(Q0, Nr, Nz, Ng)
         vals.append(F0rz.ravel())
     vlims = None
-    if vals:
+    if vals and (vmin_user is None or vmax_user is None):
         big = np.concatenate(vals)
-        vlims = (np.percentile(big, 2), np.percentile(big, 98))
+        vmin_est, vmax_est = np.percentile(big, [2, 98])
+        vlims = (vmin_est, vmax_est)
 
-    # tiempos de frames
+    # Build frame time list
     times_all = []
     metas = {}
     for s in steps[::every]:
@@ -220,11 +249,11 @@ def render_one_run(run_dir: Path, field: str, mode_arg: str, amp_mode: str, k_ar
         times_all.append(t)
         metas[s] = (t, NrS, NzS, NgS, RmaxS, ZmaxS)
     if not times_all:
-        print(f"[WARN] No hay metadatos legibles en {run_dir}")
+        print(f"[WARN] No readable metadata in {run_dir}")
         return
     times_all = np.asarray(times_all, float)
 
-    # construir a(t) según amp_mode
+    # Amplitude time series
     if mode == "stable":
         a_t_series = np.zeros_like(times_all)
     elif amp_mode == "fixed":
@@ -237,7 +266,7 @@ def render_one_run(run_dir: Path, field: str, mode_arg: str, amp_mode: str, k_ar
         a_t_series = np.clip(a_t_series, 0.0, a_sat)
     elif amp_mode == "auto-logistic":
         gamma_eff = gamma_use
-        p = max(0.5, float(logistic_power))  # logística generalizada
+        p = max(0.5, float(logistic_power))
         a_t_series = evolve_amplitude(times_all, a0_init=a0_base, gamma=gamma_eff, a_sat=a_sat, p=p)
     elif amp_mode == "auto-energy":
         gamma_eff = gamma_use
@@ -247,13 +276,14 @@ def render_one_run(run_dir: Path, field: str, mode_arg: str, amp_mode: str, k_ar
         gamma_eff = 0.0
         a_t_series = np.full_like(times_all, a0_default)
 
-    # escritor de video
+    # Optional MP4 writer
     writer = None
+    out_mp4 = None
     if make_mp4:
         out_mp4 = run_dir / f"viz_{field}_{mode}.mp4"
         writer = imageio.get_writer(out_mp4, fps=fps, macro_block_size=None)
 
-    # figura única (evita warnings)
+    # Single figure reused for all frames (faster)
     fig = None; ax = None; im = None; cb = None
     last_png = run_dir / f"viz_{field}_{mode}_last.png"
 
@@ -281,10 +311,13 @@ def render_one_run(run_dir: Path, field: str, mode_arg: str, amp_mode: str, k_ar
         if fig is None:
             fig = plt.figure(figsize=(9,4.8), dpi=dpi, constrained_layout=True)
             ax  = fig.add_subplot(111)
-            vmin, vmax = vlims if vlims is not None else np.percentile(img, [2,98])
+            if vmin_user is not None and vmax_user is not None:
+                vmin, vmax = vmin_user, vmax_user
+            else:
+                vmin, vmax = (np.percentile(img, [2,98]) if vlims is None else vlims)
             im = ax.imshow(img, origin="lower", aspect="auto",
                            extent=[z[0], z[-1], -Rview, Rview],
-                           vmin=vmin, vmax=vmax, cmap="viridis", interpolation="nearest")
+                           vmin=vmin, vmax=vmax, cmap=cmap, interpolation="nearest")
             cb = fig.colorbar(im); cb.set_label("field")
             ax.set_xlabel("z [m]"); ax.set_ylabel("x [m]")
         else:
@@ -305,44 +338,109 @@ def render_one_run(run_dir: Path, field: str, mode_arg: str, amp_mode: str, k_ar
         writer.close()
         print("Saved:", out_mp4)
 
-# ------------------ main (multi-runs) ------------------
+def print_extended_help() -> None:
+    """Human-friendly extended help with workflow and examples."""
+    txt = r"""
+=== Extended Help (viz.py) ===
+
+Suggested workflow
+------------------
+1) python utils.py
+2) python diagnostics.py --run-dir <RUN> ...
+3) python viz.py --run-dir <RUN> --mode auto --make-mp4 --fps 30
+
+Key flags
+---------
+--run-dir / --run-dirs     : One or more runs to render.
+--field                    : p | rho | vr | Bth | Bz
+--mode                     : kink | sausage | stable | auto  (auto infers from run folder name)
+--amp-mode                 : fixed | auto | auto-logistic | auto-energy
+--k                        : Axial wavenumber [rad/m]. If None => 2π/Zmax.
+--a0, --gamma              : Initial amplitude and γ for 'fixed'.
+--phase-speed              : Phase speed [m/s] for axial modulation.
+--rview                    : Lateral half-width shown (default 1.05*Rmax).
+--every                    : Skip snapshots to speed up (1 = use all).
+--make-mp4 --fps --dpi     : Export video and control quality.
+--nx                       : Horizontal resolution (x) of synthetic render.
+--t-ref-step               : Step used to anchor t0 (if None uses first).
+--a-sat-frac               : Geometric saturation (a_sat = frac*Rmax).
+--auto-core-frac/window    : Params to estimate γ automatically if fit is absent.
+--sausage-bounds/ksoft/beta: Smooth clamp and mapping controls for 'sausage'.
+--logistic-power           : Exponent p for generalized logistic growth.
+--cmap                     : Matplotlib colormap (e.g., viridis, plasma, magma).
+--vmin/--vmax              : Manual color limits (otherwise estimated globally).
+
+Your recommended commands (verbatim)
+------------------------------------
+python pyscripts/viz.py --run-dir ./data/sausage_m0_2p5d --field p --mode auto --amp-mode auto-logistic --logistic-power 1.8 --a-sat-frac 0.65 --sausage-bounds 0.60 1.60 --sausage-ksoft 6.0 --sausage-beta 0.95 --make-mp4 --fps 24
+
+python pyscripts/viz.py --run-dir ./data/kink_m1_2p5d --field p --mode auto --amp-mode auto-logistic --logistic-power 1.6 --a-sat-frac 0.60 --make-mp4 --fps 24
+python pyscripts\viz.py --run-dir .\data\kink_m1_2p5d --field p  --mode auto --amp-mode auto-logistic --a-sat-frac 0.5 --make-mp4 --fps 24
+
+python pyscripts\viz.py --run-dir .\data\stable_ref_2p5d --field p --mode stable --make-mp4 --fps 24
+
+Examples (generic)
+------------------
+# Auto-gamma (use fit if present; else estimate):
+python viz.py --run-dir out/runA --mode auto --make-mp4 --fps 24
+
+# Sausage with smooth clamp and manual color limits:
+python viz.py --run-dir out/runA --mode sausage --cmap magma --vmin -2 --vmax 2 \
+              --sausage-bounds 0.8 1.3 --sausage-ksoft 5.0 --sausage-beta 0.6
+
+# Kink with fixed parameters:
+python viz.py --run-dir out/runB --mode kink --amp-mode fixed --a0 0.003 --gamma 5e4 --make-mp4
+"""
+    print(txt.strip())
+
+# ------------------ CLI ------------------
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--run-dir", help="un solo directorio de run")
-    ap.add_argument("--run-dirs", nargs="+", help="uno o más directorios de run")
+    ap.add_argument("--help-extended", action="store_true", help="Show extended guidance")
+    ap.add_argument("--run-dir", help="single run directory")
+    ap.add_argument("--run-dirs", nargs="+", help="one or more run directories")
     ap.add_argument("--field", choices=["p","rho","vr","Bth","Bz"], default="p")
     ap.add_argument("--mode", choices=["kink","sausage","stable","auto"], default="auto")
     ap.add_argument("--amp-mode", choices=["fixed","auto","auto-logistic","auto-energy"], default="auto")
-    ap.add_argument("--k", type=float, default=None, help="rad/m; si None usa 2π/Zmax")
-    ap.add_argument("--a0", type=float, default=None, help="amplitud inicial [m] si fixed")
-    ap.add_argument("--gamma", type=float, default=0.0, help="γ [1/s] si fixed")
+    ap.add_argument("--k", type=float, default=None, help="rad/m; if None uses 2π/Zmax")
+    ap.add_argument("--a0", type=float, default=None, help="initial amplitude [m] if 'fixed'")
+    ap.add_argument("--gamma", type=float, default=0.0, help="γ [1/s] if 'fixed'")
     ap.add_argument("--phase-speed", type=float, default=0.0, help="c [m/s]")
-    ap.add_argument("--rview", type=float, default=None, help="semi-ancho lateral mostrado [m]")
+    ap.add_argument("--rview", type=float, default=None, help="lateral half-width shown [m]")
     ap.add_argument("--every", type=int, default=1)
     ap.add_argument("--make-mp4", action="store_true")
     ap.add_argument("--fps", type=int, default=24)
     ap.add_argument("--dpi", type=int, default=140)
     ap.add_argument("--nx", type=int, default=700)
-    # Auto / saturación
+    # Auto / saturation
     ap.add_argument("--t-ref-step", type=int, default=None)
-    ap.add_argument("--a-sat-frac", type=float, default=0.50, help="saturación geométrica a_sat = frac*Rmax")
+    ap.add_argument("--a-sat-frac", type=float, default=0.50, help="saturation a_sat = frac*Rmax")
     ap.add_argument("--auto-core-frac", type=float, default=0.35)
     ap.add_argument("--auto-window-frac", type=float, default=0.25)
     # Sausage soft-clamp
     ap.add_argument("--sausage-bounds", nargs=2, type=float, default=[0.75, 1.25],
-                    metavar=("LO","HI"), help="límites suaves del stretch")
-    ap.add_argument("--sausage-ksoft", type=float, default=4.0, help="suavidad del clamp")
-    ap.add_argument("--sausage-beta", type=float, default=0.65, help="exponente del stretch en el mapeo")
-    # Logística generalizada
+                    metavar=("LO","HI"), help="smooth limits for stretch")
+    ap.add_argument("--sausage-ksoft", type=float, default=4.0, help="smoothness of clamp")
+    ap.add_argument("--sausage-beta", type=float, default=0.65, help="stretch exponent in mapping")
+    # Generalized logistic
     ap.add_argument("--logistic-power", type=float, default=1.0,
-                    help="exponente p de la logística generalizada (1.0 = clásica)")
-    args = ap.parse_args()
+                    help="exponent p for generalized logistic (1.0 = classical)")
+    # Visual extras
+    ap.add_argument("--cmap", type=str, default="viridis", help="matplotlib colormap")
+    ap.add_argument("--vmin", type=float, default=None)
+    ap.add_argument("--vmax", type=float, default=None)
+    args, unknown = ap.parse_known_args()
 
-    runs = []
+    # Show extended help if no CLI args or if requested
+    if len(sys.argv) == 1 or args.help_extended:
+        print_extended_help()
+        return
+
+    runs: List[Path] = []
     if args.run_dirs: runs.extend([Path(p) for p in args.run_dirs])
     if args.run_dir:  runs.append(Path(args.run_dir))
     if not runs:
-        raise SystemExit("[ERR] Debes pasar --run-dir o --run-dirs ...")
+        raise SystemExit("[ERR] You must pass --run-dir or --run-dirs ...")
 
     for rd in runs:
         render_one_run(
@@ -353,7 +451,8 @@ def main():
             auto_core_frac=args.auto_core_frac, auto_window_frac=args.auto_window_frac,
             sausage_bounds=(float(args.sausage_bounds[0]), float(args.sausage_bounds[1])),
             sausage_ksoft=args.sausage_ksoft, sausage_beta=args.sausage_beta,
-            logistic_power=args.logistic_power
+            logistic_power=args.logistic_power, cmap=args.cmap,
+            vmin_user=args.vmin, vmax_user=args.vmax
         )
 
 if __name__ == "__main__":

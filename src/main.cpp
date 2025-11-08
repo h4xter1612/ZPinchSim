@@ -195,8 +195,8 @@ int main(int argc, char** argv) {
         // Friendly end message with next steps for analysis.
         std::cout << "Simulation completed.\n"
                   << "For analysis/visualization, run Python scripts in the 'viz' folder, e.g.:\n"
-                  << "  python viz/diagnostics.py --run-dir " << out_dir << " [...]\n"
-                  << "  python viz/viz.py         --run-dir " << out_dir << " [...]\n";
+                  << "  python pyscripts/diagnostics.py --run-dir " << out_dir << " [...]\n"
+                  << "  python pyscripts/viz.py         --run-dir " << out_dir << " [...]\n";
         return 0;
     }
 
