@@ -4,7 +4,8 @@
 #include "reconstruction.hpp"
 #include "io.hpp"
 #include "utils.hpp"
-
+#include <chrono>
+#include <sstream>
 #include <vector>
 #include <cmath>
 #include <fstream>
@@ -183,20 +184,79 @@ static void init_problem(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhd
         }
     }
 
-    {   // diagnóstico balance radial
-        double resid_L2 = 0.0, norm_L2 = 0.0;
-        for (std::size_t i=1; i+1<NrT; ++i){
-            const double r  = std::max(std::fabs(rcoord[i]), 0.5*g.dr);
-            const double dpdr = (p_r[i+1] - p_r[i-1])/(2.0*g.dr);
-            const double dBdr = (Bth_r[i+1] - Bth_r[i-1])/(2.0*g.dr);
-            const double R = dpdr + Bth_r[i]*dBdr + (Bth_r[i]*Bth_r[i])/r;
-            resid_L2 += R*R;
-            norm_L2  += dpdr*dpdr;
+    {   // diagnóstico balance radial — extendido
+        double resid_L2 = 0.0, norm_L2 = 0.0, resid_Linf = 0.0;
+        double dpdr_min = +1e300, dpdr_max = -1e300;
+
+        // Pico de Btheta y su radio
+        double Bth_abs_max = 0.0;
+        std::size_t i_Bth_max = 0;
+        for (std::size_t i = 0; i < NrT; ++i){
+            double a = std::abs(Bth_r[i]);
+            if (a > Bth_abs_max){ Bth_abs_max = a; i_Bth_max = i; }
         }
-        resid_L2 = std::sqrt(resid_L2 / std::max<std::size_t>(1, NrT-2));
-        norm_L2  = std::sqrt(norm_L2  / std::max<std::size_t>(1, NrT-2));
+        const double r_Bth_max = (int(i_Bth_max) - int(g.Ng) + 0.5) * g.dr;
+
+        // Acumuladores para normas y rangos
+        for (std::size_t i = 1; i + 1 < NrT; ++i){
+            const double r    = std::max(std::fabs(rcoord[i]), 0.5 * g.dr);
+            const double dpdr = (p_r[i+1] - p_r[i-1]) / (2.0 * g.dr);
+            const double dBdr = (Bth_r[i+1] - Bth_r[i-1]) / (2.0 * g.dr);
+            const double R    = dpdr + Bth_r[i]*dBdr + (Bth_r[i]*Bth_r[i]) / r; // equilibrio radial
+
+            resid_L2   += R*R;
+            norm_L2    += dpdr*dpdr;
+            resid_Linf  = std::max(resid_Linf, std::abs(R));
+            dpdr_min    = std::min(dpdr_min, dpdr);
+            dpdr_max    = std::max(dpdr_max, dpdr);
+        }
+        const std::size_t N = std::max<std::size_t>(1, NrT - 2);
+        resid_L2 = std::sqrt(resid_L2 / N);
+        norm_L2  = std::sqrt(norm_L2  / N);
+        const double rel_L2 = (norm_L2 > 0.0) ? (resid_L2 / norm_L2) : 0.0;
+
+        // Parámetros en el centro (i_c ~ radio medio)
+        const std::size_t ic = g.Ng + g.Nr/2;
+        const double p0   = p_r[ic];
+        const double rhoC = rho0; // consistente con arriba
+        const double cs0  = std::sqrt(std::max(0.0, mhd.gamma * p0 / std::max(1e-12, rhoC)));
+        const double B2_0 = cfg.phys.Bz0*cfg.phys.Bz0 + Bth_r[ic]*Bth_r[ic];
+        const double vA0  = std::sqrt(B2_0 / std::max(1e-12, rhoC));
+        const double cf0  = std::sqrt(cs0*cs0 + vA0*vA0);
+        const double beta0= (B2_0 > 0.0) ? (2.0 * p0 / B2_0) : 0.0; // μ0=1 en unidades MHD típicas
+
+        // Estimación de CFL inicial (v≈0 al inicio)
+        const double hmin     = std::min(g.dr, g.dz);
+        const double denom    = std::max(1e-12, cf0);
+        const double dt_cfl0  = mhd.cfl * hmin / denom;
+
+        // Info de malla
+        std::cerr << std::setprecision(6) << std::scientific;
+        std::cerr << "[INIT] grid: Nr=" << g.Nr << " Nz=" << g.Nz
+                  << " dr=" << g.dr << " dz=" << g.dz
+                  << " Rmax=" << g.Rmax << " Zmax=" << g.Zmax << "\n";
+
+        // Equilibrio
         std::cerr << "[INIT] radial_balance_L2=" << resid_L2
-                  << " (norm=" << norm_L2 << ")\n";
+                  << " (norm=" << norm_L2 << ", rel=" << rel_L2 << ")\n";
+        std::cerr << "[INIT] radial_balance_Linf=" << resid_Linf << "\n";
+        std::cerr << "[INIT] dp/dr range = [" << dpdr_min << ", " << dpdr_max << "]\n";
+
+        // Campos y termodinámica
+        std::cerr << "[INIT] center: p0=" << p0
+                  << " Bz0=" << cfg.phys.Bz0
+                  << " Bth0=" << Bth_r[ic]
+                  << " beta0=" << beta0
+                  << " cs0=" << cs0
+                  << " vA0=" << vA0
+                  << " cf0=" << cf0 << "\n";
+
+        // Geometría de Bθ
+        std::cerr << "[INIT] Bth_peak=" << Bth_abs_max
+                  << " at r=" << r_Bth_max << " (R0=" << R0 << ")\n";
+
+        // Sugerencia de paso inicial por CFL
+        std::cerr << "[INIT] CFL(dt0) ~ " << dt_cfl0 << "  (v~0, usando cf0)\n";
     }
 }
 
@@ -995,6 +1055,18 @@ void run_2d_mhd_toy(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhdcfg){
     namespace fs = std::filesystem;
     fs::create_directories(cfg.out_dir + "/debug");
 
+    // ---- Inicialización de I/O rápido (una sola vez) ----
+    {
+        static bool io_inited = false;
+        if (!io_inited) {
+            std::ios::sync_with_stdio(false);
+            std::cin.tie(nullptr);
+            std::cout.tie(nullptr);
+            std::setvbuf(stdout, nullptr, _IOFBF, 1<<20); // 1 MiB buffer a stdout
+            io_inited = true;
+        }
+    }
+
     #ifdef _OPENMP
     {
         int th = 0;
@@ -1022,13 +1094,49 @@ void run_2d_mhd_toy(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhdcfg){
 
     recon::Limiter lim = (mhdcfg.limiter=="minmod") ? recon::Limiter::Minmod : recon::Limiter::MC;
 
-    { std::ofstream(cfg.out_dir + "/debug/2d_mhd_metrics.csv")
-          << "t,divB_L2,Etot,E_Bth,vmax_raw,dt,Ak\n"; }
+    // --- Archivo de métricas con búfer persistente ---
+    std::ofstream metrics(cfg.out_dir + "/debug/2d_mhd_metrics.csv", std::ios::out);
+    static std::vector<char> fbuf(1<<20);
+    metrics.rdbuf()->pubsetbuf(fbuf.data(), static_cast<std::streamsize>(fbuf.size()));
+    metrics << "t,divB_L2,Etot,E_Bth,vmax_raw,dt,Ak\n";
 
     const bool periodic_z = (mhdcfg.bc_z == "periodic");
 
     double t = 0.0;
     int    step = 0;
+
+    // --- Barra de progreso ultra-ligera ---
+    auto t0 = std::chrono::steady_clock::now();
+    const int  PROG_EVERY = 100;                          // refresca cada N pasos
+    const auto UI_DT      = std::chrono::milliseconds(500); // y al menos cada 0.5 s
+    auto last_ui = t0;
+
+    auto print_progress = [&](double frac, int step_, double t_sim, double dt_last, double vmax){
+        frac = std::clamp(frac, 0.0, 1.0);
+        constexpr int W = 40;
+        int filled = (int)std::lround(frac * W);
+
+        // ETA basado en tiempo transcurrido
+        auto now = std::chrono::steady_clock::now();
+        double elapsed = std::chrono::duration<double>(now - t0).count();
+        double eta = (frac > 1e-9) ? elapsed * (1.0 - frac) / frac : 0.0;
+
+        // Construcción de la barra y línea con snprintf
+        static char bar[W+1];
+        for (int i=0;i<W;i++) bar[i] = (i<filled ? '#' : '-');
+        bar[W] = '\0';
+
+        int s = (int)std::llround(eta);
+        int h = s/3600; s%=3600; int m = s/60; s%=60;
+
+        static char buf[256];
+        int n = std::snprintf(buf, sizeof(buf),
+            "\r[%s] %5.1f%%  t=%.2e  dt=%.2e  vmax=%.3g  ETA %02d:%02d:%02d  (step %d)",
+            bar, 100.0*frac, t_sim, dt_last, vmax, h, m, s, step_);
+        if (n < 0) return; // por seguridad
+
+        std::fwrite(buf, 1, std::min<int>(n, (int)sizeof(buf)), stdout); // sin flush
+    };
 
     while (t < mhdcfg.t_end - 1e-16) {
         double vmax_raw = 1e-6;
@@ -1056,6 +1164,7 @@ void run_2d_mhd_toy(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhdcfg){
         if (mhdcfg.dt_max > 0.0) dt = std::min(dt, mhdcfg.dt_max);
         dt = std::clamp(dt, 1e-12, mhdcfg.t_end - t);
 
+        // Paso completo + half-step con las mismas fases numéricas que ya tenías
         mhd_sweep_r(F, cfg, mhdcfg.gamma, lim, dt);
         mhd_sweep_z(F, cfg, mhdcfg.gamma, lim, dt, periodic_z);
         ct_update(F, cfg, dt, mhdcfg.eta_ct, periodic_z);
@@ -1078,14 +1187,20 @@ void run_2d_mhd_toy(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhdcfg){
 
         t += dt; step++;
 
-        if (step % 100 == 0) {
-            std::cout << "[2D_MHD_TOY] t=" << t
-                      << " step=" << step
-                      << " dt=" << dt
-                      << " vmax_raw=" << vmax_raw << "\n";
+        // ---- Barra de progreso: throttle por tiempo + cada N pasos ----
+        if (step % PROG_EVERY == 0) {
+            auto now = std::chrono::steady_clock::now();
+            if (now - last_ui >= UI_DT) {
+                double frac = (mhdcfg.t_end > 0.0) ? (t / mhdcfg.t_end) : 0.0;
+                print_progress(frac, step, t, dt, vmax_raw);
+                std::fflush(stdout);  // flush sólo cada UI_DT
+                last_ui = now;
+            }
         }
+
+        // ---- Seguridad/diagnóstico ----
         if (utils::count_nans(F) > 0) {
-            std::cerr << "[ABORT] NaNs at step " << step << ", t=" << t << "\n";
+            std::cerr << "\n[ABORT] NaNs at step " << step << ", t=" << t << "\n";
             utils::DebugFrame dbg;
             dbg.t=t; dbg.dt=dt; dbg.cfl=mhdcfg.cfl; dbg.max_wave=vmax_raw;
             dbg.divB_L2_val=utils::divB_L2(F);
@@ -1095,30 +1210,37 @@ void run_2d_mhd_toy(Fields& F, const RunConfig& cfg, const MHD2DConfig& mhdcfg){
             dbg.write_json(cfg.out_dir, step);
             break;
         }
+
+        // ---- Snapshots (los mantengo tal cual, según output_every) ----
         if (step % cfg.output_every == 0){
             io::write_snapshot(F, cfg, step, t);
             io::write_snapshot_2p5D(F, cfg, step, t, k_proj);
             io::write_diag(cfg.out_dir, step, t, vmax_raw);
         }
+
+        // ---- Métricas (archivo con buffer, poco flush) ----
         if (step % mhdcfg.diag_every == 0){
             const double EBth = energy_Btheta(F);
             const double Ak   = mhdcfg.write_mode_amp ? mode_amplitude_k(F, mhdcfg.k_diag, mhdcfg.amp_from) : 0.0;
-            std::ofstream(cfg.out_dir + "/debug/2d_mhd_metrics.csv", std::ios::app)
-                << std::setprecision(16)
-                << t << "," << utils::divB_L2(F) << "," << utils::total_energy(F,cfg)
-                << "," << EBth << "," << vmax_raw << "," << dt << "," << Ak << "\n";
+            metrics << std::setprecision(16)
+                    << t << "," << utils::divB_L2(F) << "," << utils::total_energy(F,cfg)
+                    << "," << EBth << "," << vmax_raw << "," << dt << "," << Ak << "\n";
+            // sin metrics.flush(); dejemos que el buffer haga su trabajo
         }
     }
 
+    // ---- Finalización: último snapshot y cierre prolijo ----
     io::write_snapshot(F, cfg, /*step=*/step, /*t=*/t);
-
     if (k_proj > 0.0) {
         io::write_snapshot_2p5D(F, cfg, /*step=*/0, /*t=*/0.0, k_proj);
     }
-    std::ofstream(cfg.out_dir + "/debug/2d_mhd_metrics.csv", std::ios::app)
-        << std::setprecision(16) << t << "," << utils::divB_L2(F) << ","
-        << utils::total_energy(F,cfg) << "," << energy_Btheta(F)
-        << "," << 0.0 << "," << 0.0 << "," << 0.0 << "\n";
+    metrics << std::setprecision(16) << t << "," << utils::divB_L2(F) << ","
+            << utils::total_energy(F,cfg) << "," << energy_Btheta(F)
+            << "," << 0.0 << "," << 0.0 << "," << 0.0 << "\n";
+    metrics.flush(); // flush final del archivo
+
+    std::fwrite("\n", 1, 1, stdout); // cerrar la línea de la barra
+    std::fflush(stdout);
 }
 
 } // namespace physics
