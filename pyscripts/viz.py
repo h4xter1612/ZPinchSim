@@ -23,16 +23,32 @@ import imageio.v2 as imageio
 
 # ------------------ I/O helpers ------------------
 _RE_T     = re.compile(r"t=([0-9eE\.\+\-]+)")
-_RE_NRNZ  = re.compile(r"Nr=(\d+), Nz=(\d+), Ng=(\d+)")
-_RE_RZMAX = re.compile(r"Rmax=([0-9eE\.\+\-]+), Zmax=([0-9eE\.\+\-]+)")
+_RE_NRNZ  = re.compile(r"Nr=(\d+),\s*Nz=(\d+),\s*Ng=(\d+)")
+_RE_RZMAX = re.compile(r"Rmax=([0-9eE\.\+\-]+),\s*Zmax=([0-9eE\.\+\-]+)")
 
 def load_meta(meta_path: Path):
-    """Parse a meta file with lines like: t=..., Nr=..., Nz=..., Ng=..., Rmax=..., Zmax=..."""
+    """
+    Parse a meta file expected to contain the keys:
+      t, Nr, Nz, Ng, Rmax, Zmax
+    Returns: (t, Nr, Nz, Ng, Rmax, Zmax)
+    """
     s = meta_path.read_text(encoding="utf-8")
-    t   = float(_RE_T.search(s).group(1))
-    Nr,Nz,Ng = map(int, _RE_NRNZ.search(s).groups())
-    Rmax,Zmax= map(float, _RE_RZMAX.search(s).groups())
-    return t,Nz and Nr,Ng,Rmax,Zmax  # intentional unpack below to keep order explicit
+
+    m_t = _RE_T.search(s)
+    m_n = _RE_NRNZ.search(s)
+    m_r = _RE_RZMAX.search(s)
+    if not (m_t and m_n and m_r):
+        raise ValueError(
+            f"[load_meta] Malformed meta file {meta_path}. "
+            "Expected lines with t=..., Nr=..., Nz=..., Ng=..., Rmax=..., Zmax=..."
+        )
+
+    t = float(m_t.group(1))
+    Nr, Nz, Ng = map(int, m_n.groups())
+    Rmax, Zmax = map(float, m_r.groups())
+
+    return t, Nr, Nz, Ng, Rmax, Zmax
+
 
 def list_steps(run_dir: Path) -> List[int]:
     """Return sorted integer step indices found in run_dir."""
