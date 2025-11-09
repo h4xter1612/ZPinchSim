@@ -233,20 +233,18 @@ Artifacts:
 
 ---
 
-## Example Results (place your GIFs here)
-
-> Put your animated GIFs in `src/sausage.gif`, `src/kink.gif`, and `src/stable.gif` and reference them here.
+## Example Results
 
 - **Sausage ($m=0$)**  
-  ![sausage](src/sausage.gif)  
+  ![sausage](include/sausage.gif)  
   Axisymmetric necking/bulging; strong modulation of cross‑section and axial magnetic pressure. Growth rate $\gamma$ from $A_k(t)$ should be clearly exponential before saturation.
 
 - **Kink ($m=1$)**  
-  ![kink](src/kink.gif)  
+  ![kink](include/kink.gif)  
   Helical centerline displacement; column “snakes” along $z$. Diagnostics show transverse motion with comparatively weaker compression.
 
 - **Stable Reference**  
-  ![stable](src/stable.gif)  
+  ![stable](include/stable.gif)  
   Equilibrium persists; perturbations are either absent or damped by resistivity/sponge/shear.
 
 ---
