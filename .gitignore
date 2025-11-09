@@ -3,6 +3,7 @@
 /Build/
 /bin/
 /out/
+/docs/
 
 # CMake temporary files
 CMakeFiles/
